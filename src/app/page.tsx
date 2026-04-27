@@ -675,7 +675,7 @@ export default function Home() {
                       処理完了後、要約と文字起こしプレビューをメールで送信します。
                     </p>
                   </div>
-                )}
+                </div>
               </div>
 
               <button 
