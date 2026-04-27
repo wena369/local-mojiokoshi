@@ -68,10 +68,24 @@ export default function Home() {
   const [isSending, setIsSending] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
   const [savedNamesList, setSavedNamesList] = useState<string[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const cancelJob = useCallback(() => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    try { localStorage.removeItem(LS_JOB_KEY); } catch {}
+    setIsProcessing(false);
+    setProgress({ step: "", percent: 0 });
+    setErrorMsg(null);
+  }, []);
 
   // Resume pending job on mount
   const resumePendingJob = useCallback(async (jobId: string) => {
     const BASE_URL = "/api";
+    const controller = new AbortController();
+    abortRef.current = controller;
     setIsProcessing(true);
     setErrorMsg(null);
     setResult(null);
@@ -80,6 +94,7 @@ export default function Home() {
     try {
       let isCompleted = false;
       while (!isCompleted) {
+        if (controller.signal.aborted) break;
         const statusResponse = await fetch(`${BASE_URL}/status/${jobId}`);
         if (!statusResponse.ok) {
           await new Promise(resolve => setTimeout(resolve, 3000));
@@ -343,6 +358,8 @@ export default function Home() {
   const handleSubmit = async () => {
     if (!file) return;
 
+    const controller = new AbortController();
+    abortRef.current = controller;
     setIsProcessing(true);
     setErrorMsg(null);
     setResult(null);
@@ -378,7 +395,9 @@ export default function Home() {
 
       let isCompleted = false;
       while (!isCompleted) {
+        if (controller.signal.aborted) break;
         await new Promise(resolve => setTimeout(resolve, 3000));
+        if (controller.signal.aborted) break;
         
         const statusResponse = await fetch(`${BASE_URL}/status/${jobId}`);
         if (!statusResponse.ok) continue;
@@ -619,6 +638,12 @@ export default function Home() {
                     style={{ width: `${progress.percent}%` }}
                   />
                 </div>
+                <button
+                  onClick={cancelJob}
+                  className="mt-4 w-full py-2.5 px-4 rounded-xl text-sm font-medium bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-all flex items-center justify-center gap-2"
+                >
+                  <AlertCircle className="w-4 h-4" /> 処理を中止する
+                </button>
               </div>
             )}
           </div>
