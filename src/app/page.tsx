@@ -55,11 +55,10 @@ function getSpeakerColor(speakerId: string) {
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const [useDiarization, setUseDiarization] = useState(true);
-  const [useRefinement, setUseRefinement] = useState(false);
-  const [useSummary, setUseSummary] = useState(false);
   
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isRefining, setIsRefining] = useState(false);
+  const [isSummarizing, setIsSummarizing] = useState(false);
   const [progress, setProgress] = useState<{ step: string; percent: number }>({ step: "", percent: 0 });
   const [result, setResult] = useState<any>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -354,9 +353,9 @@ export default function Home() {
 
     const formData = new FormData();
     formData.append("file", file);
-    formData.append("diarization", useDiarization.toString());
-    formData.append("refinement", useRefinement.toString());
-    formData.append("summary", useSummary.toString());
+    formData.append("diarization", "true");
+    formData.append("refinement", "false");
+    formData.append("summary", "false");
 
     try {
       const response = await fetch(`${BASE_URL}/transcribe_async`, {
@@ -476,6 +475,56 @@ export default function Home() {
     }
   };
 
+  // Step 2: Refine with speaker names
+  const handleRefine = async () => {
+    if (!result?.segments) return;
+    setIsRefining(true);
+    setErrorMsg(null);
+    try {
+      const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "/api";
+      const response = await fetch(`${BACKEND}/refine`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          segments: result.segments,
+          speaker_names: speakerNames,
+        }),
+      });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+      setResult((prev: any) => ({ ...prev, refinedText: data.refinedText }));
+    } catch (error: any) {
+      setErrorMsg(`推敲エラー: ${error.message}`);
+    } finally {
+      setIsRefining(false);
+    }
+  };
+
+  // Step 3: Summarize with speaker names
+  const handleSummarize = async () => {
+    if (!result?.segments) return;
+    setIsSummarizing(true);
+    setErrorMsg(null);
+    try {
+      const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "/api";
+      const response = await fetch(`${BACKEND}/summarize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          segments: result.segments,
+          speaker_names: speakerNames,
+        }),
+      });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+      setResult((prev: any) => ({ ...prev, summary: data.summary }));
+    } catch (error: any) {
+      setErrorMsg(`要約エラー: ${error.message}`);
+    } finally {
+      setIsSummarizing(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-950 text-white selection:bg-indigo-500/30">
       <div className="max-w-5xl mx-auto px-6 py-12">
@@ -577,62 +626,40 @@ export default function Home() {
               </div>
 
               <div className="space-y-4">
-                {/* Diarization Toggle */}
-                <label className="flex items-start gap-4 p-4 rounded-2xl bg-slate-900/50 border border-slate-700 cursor-pointer hover:border-indigo-500/50 transition-colors group">
-                  <div className="flex-shrink-0 pt-1">
-                    <div className={`w-5 h-5 rounded-md border flex items-center justify-center transition-colors ${useDiarization ? 'bg-indigo-500 border-indigo-500' : 'border-slate-600 group-hover:border-indigo-400'}`}>
-                      {useDiarization && <CheckCircle2 className="w-3.5 h-3.5 text-white" />}
-                    </div>
-                    <input type="checkbox" className="hidden" checked={useDiarization} onChange={(e) => setUseDiarization(e.target.checked)} />
-                  </div>
-                  <div>
+                {/* Processing Info Panel */}
+                <div className="space-y-3">
+                  <h3 className="text-sm font-medium text-slate-300 px-1 flex items-center gap-2">
+                    <Settings className="w-4 h-4" /> 処理の流れ
+                  </h3>
+
+                  <div className="p-4 rounded-2xl bg-slate-900/50 border border-cyan-500/30">
                     <p className="font-medium text-slate-200 mb-1 flex items-center gap-2">
-                      <PlayCircle className="w-4 h-4 text-emerald-400" /> 話者を識別する
+                      <span className="text-cyan-400 font-bold">①</span> 文字起こし＋話者分離
                     </p>
                     <p className="text-xs text-slate-400 leading-relaxed">
-                      誰が話したかを「話者A」「話者B」のように分離します。会議の議事録などに最適です。
+                      GPU（WhisperX）で高精度な文字起こしと話者分離を行います。
                     </p>
                   </div>
-                </label>
 
-                {/* Refinement Toggle */}
-                <label className="flex items-start gap-4 p-4 rounded-2xl bg-slate-900/50 border border-slate-700 cursor-pointer hover:border-purple-500/50 transition-colors group">
-                  <div className="flex-shrink-0 pt-1">
-                    <div className={`w-5 h-5 rounded-md border flex items-center justify-center transition-colors ${useRefinement ? 'bg-purple-500 border-purple-500' : 'border-slate-600 group-hover:border-purple-400'}`}>
-                      {useRefinement && <CheckCircle2 className="w-3.5 h-3.5 text-white" />}
-                    </div>
-                    <input type="checkbox" className="hidden" checked={useRefinement} onChange={(e) => setUseRefinement(e.target.checked)} />
-                  </div>
-                  <div>
+                  <div className="p-4 rounded-2xl bg-slate-900/50 border border-purple-500/30">
                     <p className="font-medium text-slate-200 mb-1 flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-purple-400" /> 日本語を推敲・整形
+                      <span className="text-purple-400 font-bold">②</span> 話者名入力 → 推敲
                     </p>
                     <p className="text-xs text-slate-400 leading-relaxed">
-                      ローカルLLMを使用して、「えー」「あの」などのケバを取り除き、自然な文章に修正します。
+                      話者名を入力してから「推敲する」ボタンで、名前入りの整形テキストを生成します。
                     </p>
                   </div>
-                </label>
 
-                {/* Summary Toggle */}
-                <label className="flex items-start gap-4 p-4 rounded-2xl bg-slate-900/50 border border-slate-700 cursor-pointer hover:border-amber-500/50 transition-colors group">
-                  <div className="flex-shrink-0 pt-1">
-                    <div className={`w-5 h-5 rounded-md border flex items-center justify-center transition-colors ${useSummary ? 'bg-amber-500 border-amber-500' : 'border-slate-600 group-hover:border-amber-400'}`}>
-                      {useSummary && <CheckCircle2 className="w-3.5 h-3.5 text-white" />}
-                    </div>
-                    <input type="checkbox" className="hidden" checked={useSummary} onChange={(e) => setUseSummary(e.target.checked)} />
-                  </div>
-                  <div>
+                  <div className="p-4 rounded-2xl bg-slate-900/50 border border-amber-500/30">
                     <p className="font-medium text-slate-200 mb-1 flex items-center gap-2">
-                      <BookOpen className="w-4 h-4 text-amber-400" /> 要約を生成
+                      <span className="text-amber-400 font-bold">③</span> 要約生成
                     </p>
                     <p className="text-xs text-slate-400 leading-relaxed">
-                      会議の内容をトピックごとに構造化して要約します。議事録やレポート作成に最適です。
+                      「要約する」ボタンで、名前入りの構造化された要約を生成します。
                     </p>
                   </div>
-                </label>
 
-                {/* Email Forward (shown when summary is enabled) */}
-                {useSummary && (
+                  {/* Email Forward */}
                   <div className="p-4 rounded-2xl bg-slate-900/50 border border-slate-700">
                     <p className="font-medium text-slate-200 mb-2 flex items-center gap-2 text-sm">
                       <Mail className="w-4 h-4 text-sky-400" /> 要約をメールで転送（任意）
@@ -697,18 +724,6 @@ export default function Home() {
         {/* Results Section */}
         {result && (
           <div className="mt-12 animate-in fade-in slide-in-from-bottom-8 duration-700">
-            {/* DEBUG INFO - visible on page */}
-            <div className="mb-4 p-4 bg-yellow-900/30 border border-yellow-500/50 rounded-xl text-xs font-mono text-yellow-200 space-y-1">
-              <p className="font-bold text-yellow-400">🔍 デバッグ情報（問題解決後に削除）</p>
-              <p>result keys: {Object.keys(result).join(', ')}</p>
-              <p>segments: {result.segments?.length ?? 'undefined'} 件</p>
-              <p>refinedText: {result.refinedText === null ? '❌ null' : result.refinedText === undefined ? '❌ undefined' : result.refinedText === '' ? '⚠️ 空文字' : `✅ あり (${result.refinedText.length}文字)`}</p>
-              <p>summary: {result.summary === null ? '❌ null' : result.summary === undefined ? '❌ undefined' : result.summary === '' ? '⚠️ 空文字' : `✅ あり (${result.summary.length}文字)`}</p>
-              <p>forwardEmail: {forwardEmail ? `✅ ${forwardEmail}` : '❌ 未設定'}</p>
-              <p>emailSent: {emailSent ? '✅ 送信済み' : '❌ 未送信'}</p>
-              {result.refinedText && <p className="text-green-300">refinedText先頭50文字: {result.refinedText.slice(0, 50)}...</p>}
-              {result.summary && <p className="text-green-300">summary先頭50文字: {result.summary.slice(0, 50)}...</p>}
-            </div>
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-2xl font-bold flex items-center gap-3">
                 <CheckCircle2 className="text-emerald-400" />
@@ -754,6 +769,46 @@ export default function Home() {
                       <option key={name} value={name} />
                     ))}
                   </datalist>
+                </div>
+
+                {/* Action buttons: Refine & Summarize */}
+                <div className="mt-4 flex flex-wrap gap-3">
+                  <button
+                    onClick={handleRefine}
+                    disabled={isRefining || isSummarizing}
+                    className={`flex-1 flex items-center justify-center gap-2 px-5 py-3 rounded-xl font-semibold text-sm transition-all
+                      ${isRefining
+                        ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30 animate-pulse cursor-not-allowed'
+                        : result?.refinedText
+                          ? 'bg-purple-500/10 text-purple-300 border border-purple-500/30 hover:bg-purple-500/20'
+                          : 'bg-purple-600 text-white hover:bg-purple-500 shadow-lg shadow-purple-500/20'}`}
+                  >
+                    {isRefining ? (
+                      <><Loader2 className="w-4 h-4 animate-spin" /> 推敲中...</>
+                    ) : result?.refinedText ? (
+                      <><Sparkles className="w-4 h-4" /> 再推敲する</>
+                    ) : (
+                      <><Sparkles className="w-4 h-4" /> ✍️ 推敲する</>
+                    )}
+                  </button>
+                  <button
+                    onClick={handleSummarize}
+                    disabled={isRefining || isSummarizing}
+                    className={`flex-1 flex items-center justify-center gap-2 px-5 py-3 rounded-xl font-semibold text-sm transition-all
+                      ${isSummarizing
+                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse cursor-not-allowed'
+                        : result?.summary
+                          ? 'bg-amber-500/10 text-amber-300 border border-amber-500/30 hover:bg-amber-500/20'
+                          : 'bg-amber-600 text-white hover:bg-amber-500 shadow-lg shadow-amber-500/20'}`}
+                  >
+                    {isSummarizing ? (
+                      <><Loader2 className="w-4 h-4 animate-spin" /> 要約中...</>
+                    ) : result?.summary ? (
+                      <><BookOpen className="w-4 h-4" /> 再要約する</>
+                    ) : (
+                      <><BookOpen className="w-4 h-4" /> 📝 要約する</>
+                    )}
+                  </button>
                 </div>
               </div>
             )}
