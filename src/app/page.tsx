@@ -477,7 +477,7 @@ export default function Home() {
 
   // Step 2: Refine with speaker names
   const handleRefine = async () => {
-    if (!result?.segments) return;
+    if (!result?.segments || isRefining) return;
     setIsRefining(true);
     setErrorMsg(null);
     try {
@@ -490,9 +490,12 @@ export default function Home() {
           speaker_names: speakerNames,
         }),
       });
+      if (!response.ok) throw new Error(`サーバーエラー (${response.status})`);
       const data = await response.json();
       if (data.error) throw new Error(data.error);
-      setResult((prev: any) => ({ ...prev, refinedText: data.refinedText }));
+      if (data.refinedText) {
+        setResult((prev: any) => ({ ...prev, refinedText: data.refinedText }));
+      }
     } catch (error: any) {
       setErrorMsg(`推敲エラー: ${error.message}`);
     } finally {
@@ -502,7 +505,7 @@ export default function Home() {
 
   // Step 3: Summarize with speaker names
   const handleSummarize = async () => {
-    if (!result?.segments) return;
+    if (!result?.segments || isSummarizing) return;
     setIsSummarizing(true);
     setErrorMsg(null);
     try {
@@ -515,9 +518,12 @@ export default function Home() {
           speaker_names: speakerNames,
         }),
       });
+      if (!response.ok) throw new Error(`サーバーエラー (${response.status})`);
       const data = await response.json();
       if (data.error) throw new Error(data.error);
-      setResult((prev: any) => ({ ...prev, summary: data.summary }));
+      if (data.summary) {
+        setResult((prev: any) => ({ ...prev, summary: data.summary }));
+      }
     } catch (error: any) {
       setErrorMsg(`要約エラー: ${error.message}`);
     } finally {
