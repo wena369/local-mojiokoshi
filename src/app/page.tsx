@@ -456,12 +456,14 @@ export default function Home() {
           stepLabel += `（経過: ${elapsedStr}）`;
           
           const stepPercents: Record<string, number> = { transcription: 20, alignment: 35, diarization: 50, refinement: 70, summary: 85 };
-          const pct = stepPercents[step] || prev.percent;
           
-          setProgress(prev => ({
-            step: stepLabel,
-            percent: Math.max(prev.percent, Math.min(pct, 95))
-          }));
+          setProgress(prev => {
+            const pct = stepPercents[step] || prev.percent;
+            return {
+              step: stepLabel,
+              percent: Math.max(prev.percent, Math.min(pct, 95))
+            };
+          });
         }
       }
 
