@@ -499,8 +499,10 @@ export default function Home() {
     if (!result?.segments || isRefining) return;
     setIsRefining(true);
     setErrorMsg(null);
+    console.log('[Refine] Starting with', result.segments.length, 'segments, speakers:', JSON.stringify(speakerNames));
     try {
       const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "/api";
+      console.log('[Refine] Sending to:', `${BACKEND}/refine`);
       const response = await fetch(`${BACKEND}/refine`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -509,13 +511,21 @@ export default function Home() {
           speaker_names: speakerNames,
         }),
       });
+      console.log('[Refine] Response status:', response.status, response.statusText);
       if (!response.ok) throw new Error(`サーバーエラー (${response.status})`);
       const data = await response.json();
+      console.log('[Refine] Response data keys:', Object.keys(data));
+      console.log('[Refine] refinedText exists:', !!data.refinedText, 'length:', data.refinedText?.length);
+      console.log('[Refine] error:', data.error);
       if (data.error) throw new Error(data.error);
       if (data.refinedText) {
         setResult((prev: any) => ({ ...prev, refinedText: data.refinedText }));
+        console.log('[Refine] setResult called with refinedText');
+      } else {
+        console.log('[Refine] WARNING: No refinedText in response!', JSON.stringify(data).slice(0, 500));
       }
     } catch (error: any) {
+      console.error('[Refine] Error:', error);
       setErrorMsg(`推敲エラー: ${error.message}`);
     } finally {
       setIsRefining(false);
