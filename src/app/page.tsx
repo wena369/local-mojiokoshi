@@ -349,7 +349,8 @@ export default function Home() {
     setResult(null);
     setProgress({ step: "📤 ファイルをeGPUにアップロード中...", percent: 5 });
     
-    const BASE_URL = "/api";
+    // Use direct backend URL to bypass Vercel's 4.5MB body limit
+    const BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "/api";
 
     const formData = new FormData();
     formData.append("file", file);
