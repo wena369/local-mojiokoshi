@@ -64,6 +64,7 @@ export default function Home() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
+  const [speakerReadings, setSpeakerReadings] = useState<Record<string, string>>({});
   const [forwardEmail, setForwardEmail] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
@@ -121,7 +122,7 @@ export default function Home() {
             try {
               const preview = completedResult.segments
                 .slice(0, 20)
-                .map((s: any) => `[${s.speaker.replace('SPEAKER_','S')}] ${s.text}`)
+                .map((s: any) => `[${s.speaker.replace('SPEAKER_','話者')}] ${s.text}`)
                 .join('\n');
               const res = await fetch('/api/send-summary', {
                 method: 'POST',
@@ -199,6 +200,20 @@ export default function Home() {
     });
   }, [savedNamesList]);
 
+  const updateSpeakerReading = useCallback((speakerId: string, reading: string) => {
+    setSpeakerReadings(prev => ({ ...prev, [speakerId]: reading }));
+  }, []);
+
+  // Combine name + reading for backend
+  const getCombinedSpeakerNames = useCallback(() => {
+    const combined: Record<string, string> = {};
+    for (const [id, name] of Object.entries(speakerNames)) {
+      const reading = speakerReadings[id];
+      combined[id] = reading ? `${name}（${reading}）` : name;
+    }
+    return combined;
+  }, [speakerNames, speakerReadings]);
+
   // Save email to localStorage
   const updateForwardEmail = useCallback((email: string) => {
     setForwardEmail(email);
@@ -215,7 +230,7 @@ export default function Home() {
 
   const getSpeakerLabel = (speakerId: string) => {
     const name = speakerNames[speakerId];
-    const short = speakerId.replace('SPEAKER_', 'S');
+    const short = speakerId.replace('SPEAKER_', '話者');
     return name ? `${short} (${name})` : short;
   };
 
@@ -223,7 +238,7 @@ export default function Home() {
     if (uniqueSpeakers.length === 0) return '';
     const lines = ['=== 話者一覧 ==='];
     uniqueSpeakers.forEach(sp => {
-      const short = sp.replace('SPEAKER_', 'S');
+      const short = sp.replace('SPEAKER_', '話者');
       const name = speakerNames[sp] || '（未設定）';
       lines.push(`${short} = ${name}`);
     });
@@ -235,8 +250,8 @@ export default function Home() {
   const downloadSpeakerTranscript = (targetSpeaker: string) => {
     if (!result?.segments) return;
     const segments = result.segments;
-    const name = speakerNames[targetSpeaker] || targetSpeaker.replace('SPEAKER_', 'S');
-    const short = targetSpeaker.replace('SPEAKER_', 'S');
+    const name = speakerNames[targetSpeaker] || targetSpeaker.replace('SPEAKER_', '話者');
+    const short = targetSpeaker.replace('SPEAKER_', '話者');
     
     // Find all indices where the target speaker talks
     const targetIndices = new Set<number>();
@@ -284,7 +299,7 @@ export default function Home() {
     try {
       const preview = result.segments
         .slice(0, 20)
-        .map((s: any) => `[${s.speaker.replace('SPEAKER_','S')}] ${s.text}`)
+        .map((s: any) => `[${s.speaker.replace('SPEAKER_','話者')}] ${s.text}`)
         .join('\n');
       const res = await fetch('/api/send-summary', {
         method: 'POST',
@@ -434,7 +449,7 @@ export default function Home() {
             try {
               const preview = completedResult.segments
                 .slice(0, 20)
-                .map((s: any) => `[${s.speaker.replace('SPEAKER_','S')}] ${s.text}`)
+                .map((s: any) => `[${s.speaker.replace('SPEAKER_','話者')}] ${s.text}`)
                 .join('\n');
               const res = await fetch('/api/send-summary', {
                 method: 'POST',
@@ -508,7 +523,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           segments: result.segments,
-          speaker_names: speakerNames,
+          speaker_names: getCombinedSpeakerNames(),
         }),
       });
       console.log('[Refine] Response status:', response.status, response.statusText);
@@ -544,7 +559,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           segments: result.segments,
-          speaker_names: speakerNames,
+          speaker_names: getCombinedSpeakerNames(),
         }),
       });
       if (!response.ok) throw new Error(`サーバーエラー (${response.status})`);
@@ -780,13 +795,13 @@ export default function Home() {
                   <Users className="w-4 h-4" />
                   話者名を設定（ダウンロード時にヘッダーに記載されます）
                 </h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 gap-3">
                   {uniqueSpeakers.map(sp => {
                     const c = getSpeakerColor(sp);
                     return (
                     <div key={sp} className="flex items-center gap-2">
                       <div className={`w-3 h-3 rounded-full ${c.dot} flex-shrink-0`} />
-                      <span className={`text-xs font-bold w-7 ${c.text}`}>{sp.replace('SPEAKER_', 'S')}</span>
+                      <span className={`text-xs font-bold w-14 ${c.text}`}>{sp.replace('SPEAKER_', '話者')}</span>
                       <input
                         type="text"
                         list="speaker-name-suggestions"
@@ -795,9 +810,16 @@ export default function Home() {
                         onChange={e => updateSpeakerName(sp, e.target.value)}
                         className="flex-1 bg-slate-900/60 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-500 focus:border-indigo-500 focus:outline-none transition-colors"
                       />
+                      <input
+                        type="text"
+                        placeholder="ふりがな（任意）"
+                        value={speakerReadings[sp] || ''}
+                        onChange={e => updateSpeakerReading(sp, e.target.value)}
+                        className="w-40 bg-slate-900/60 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-500 focus:border-indigo-500 focus:outline-none transition-colors"
+                      />
                       <button
                         onClick={() => downloadSpeakerTranscript(sp)}
-                        title={`${sp.replace('SPEAKER_','S')} の発言を個別ダウンロード（前後の会話コンテキスト付き）`}
+                        title={`${sp.replace('SPEAKER_','話者')} の発言を個別ダウンロード（前後の会話コンテキスト付き）`}
                         className={`p-1.5 rounded-lg hover:bg-slate-700 transition-colors flex-shrink-0 ${c.text}`}
                       >
                         <Download className="w-3.5 h-3.5" />
@@ -868,7 +890,7 @@ export default function Home() {
                     <button
                       onClick={() => {
                         const header = buildDownloadHeader();
-                        const body = result.segments.map((s: any) => `[${formatTime(s.start)}-${formatTime(s.end)}] ${s.speaker.replace('SPEAKER_','S')}: ${s.text}`).join('\n');
+                        const body = result.segments.map((s: any) => `[${formatTime(s.start)}-${formatTime(s.end)}] ${s.speaker.replace('SPEAKER_','話者')}: ${s.text}`).join('\n');
                         downloadAsText(header + body, `transcript_${new Date().toISOString().slice(0,10)}.txt`);
                       }}
                       className="p-2 hover:bg-slate-700 rounded-lg transition-colors" title="ダウンロード">
@@ -886,7 +908,7 @@ export default function Home() {
                             <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${c.bg} ${c.text} border ${c.border}`}
                               title={speakerNames[segment.speaker] || segment.speaker}
                             >
-                              {segment.speaker.replace('SPEAKER_', 'S')}
+                              {segment.speaker.replace('SPEAKER_', '話者')}
                             </div>
                           );
                         })()}
