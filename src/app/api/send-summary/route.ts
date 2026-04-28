@@ -3,10 +3,11 @@ import nodemailer from "nodemailer";
 
 export async function POST(req: NextRequest) {
   try {
-    const { to, summary, title, speakers, transcriptPreview } = await req.json();
+    const { to, summary, refinedText, title, speakers, transcriptPreview, type } = await req.json();
 
-    if (!to || !summary) {
-      return NextResponse.json({ error: "to and summary are required" }, { status: 400 });
+    const content = type === "refined" ? refinedText : summary;
+    if (!to || !content) {
+      return NextResponse.json({ error: "to and content are required" }, { status: 400 });
     }
 
     const transporter = nodemailer.createTransport({
@@ -20,15 +21,19 @@ export async function POST(req: NextRequest) {
     });
 
     const fromAddress = process.env.SMTP_FROM || "noreply@enartsu.co.jp";
-    const dateStr = new Date().toLocaleDateString("ja-JP", { year: "numeric", month: "long", day: "numeric" });
-    const meetingTitle = title || `文字起こし要約 ${dateStr}`;
+    const now = new Date();
+    const dateForSubject = `${now.getFullYear()}_${String(now.getMonth()+1).padStart(2,'0')}_${String(now.getDate()).padStart(2,'0')}`;
+    const dateStr = now.toLocaleDateString("ja-JP", { year: "numeric", month: "long", day: "numeric" });
+
+    const subjectLabel = type === "refined" ? "推敲文" : "要約文";
+    const meetingTitle = `${dateForSubject}ローカル文字起こし${subjectLabel}`;
 
     // Build speaker list HTML
     let speakerHtml = "";
     if (speakers && Object.keys(speakers).length > 0) {
       const entries = Object.entries(speakers)
         .filter(([_, name]) => name)
-        .map(([id, name]) => `<li style="color: #666; font-size: 14px;">${(id as string).replace("SPEAKER_", "S")} = ${name}</li>`)
+        .map(([id, name]) => `<li style="color: #666; font-size: 14px;">${(id as string).replace("SPEAKER_", "話者")} = ${name}</li>`)
         .join("");
       if (entries) {
         speakerHtml = `
@@ -40,17 +45,17 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Convert summary text to HTML with proper formatting
-    const summaryHtml = summary
+    // Convert content text to HTML with proper formatting
+    const contentHtml = content
       .replace(/【(.+?)】/g, '<h2 style="color: #1e293b; font-size: 18px; margin: 24px 0 12px 0; padding-bottom: 6px; border-bottom: 2px solid #f59e0b;">$1</h2>')
       .replace(/^・(.+)$/gm, '<li style="margin-bottom: 6px; color: #374151; font-size: 14px; line-height: 1.7;">$1</li>')
       .replace(/(<li.*?<\/li>\n?)+/gs, '<ul style="margin: 0 0 16px 0; padding-left: 20px;">$&</ul>')
       .replace(/\n{2,}/g, "<br/><br/>")
       .replace(/\n/g, "<br/>");
 
-    // Preview of transcript
+    // Preview of transcript (only for summary emails)
     let previewHtml = "";
-    if (transcriptPreview) {
+    if (type !== "refined" && transcriptPreview) {
       previewHtml = `
         <div style="margin-top: 32px; padding-top: 24px; border-top: 1px solid #e5e7eb;">
           <h3 style="color: #9ca3af; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px;">文字起こしプレビュー（最初の20件）</h3>
@@ -59,6 +64,9 @@ export async function POST(req: NextRequest) {
       `;
     }
 
+    const accentColor = type === "refined" ? "#8b5cf6" : "#f59e0b";
+    const gradientEnd = type === "refined" ? "#a855f7" : "#f97316";
+
     const html = `
 <!DOCTYPE html>
 <html>
@@ -66,7 +74,7 @@ export async function POST(req: NextRequest) {
 <body style="margin: 0; padding: 0; background: #f3f4f6; font-family: 'Helvetica Neue', Arial, 'Hiragino Sans', sans-serif;">
   <div style="max-width: 640px; margin: 0 auto; padding: 24px;">
     <!-- Header -->
-    <div style="background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%); border-radius: 16px 16px 0 0; padding: 32px 24px; text-align: center;">
+    <div style="background: linear-gradient(135deg, #6366f1 0%, ${accentColor} 50%, ${gradientEnd} 100%); border-radius: 16px 16px 0 0; padding: 32px 24px; text-align: center;">
       <div style="font-size: 12px; color: rgba(255,255,255,0.7); text-transform: uppercase; letter-spacing: 2px; margin-bottom: 8px;">AI Transcriber</div>
       <h1 style="margin: 0; color: white; font-size: 22px; font-weight: 700;">${meetingTitle}</h1>
       <div style="margin-top: 12px; color: rgba(255,255,255,0.8); font-size: 13px;">${dateStr}</div>
@@ -75,7 +83,7 @@ export async function POST(req: NextRequest) {
     <!-- Content -->
     <div style="background: white; padding: 32px 24px; border-radius: 0 0 16px 16px; box-shadow: 0 4px 24px rgba(0,0,0,0.06);">
       ${speakerHtml}
-      ${summaryHtml}
+      ${contentHtml}
       ${previewHtml}
     </div>
 
@@ -92,11 +100,11 @@ export async function POST(req: NextRequest) {
     if (speakers && Object.keys(speakers).length > 0) {
       plainText += "=== 話者一覧 ===\n";
       Object.entries(speakers).forEach(([id, name]) => {
-        if (name) plainText += `${(id as string).replace("SPEAKER_", "S")} = ${name}\n`;
+        if (name) plainText += `${(id as string).replace("SPEAKER_", "話者")} = ${name}\n`;
       });
       plainText += "================\n\n";
     }
-    plainText += summary;
+    plainText += content;
 
     // Check SMTP credentials
     if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
@@ -115,7 +123,7 @@ export async function POST(req: NextRequest) {
       html,
     });
 
-    console.log(`[Email] Summary sent to ${to}: ${info.messageId}`);
+    console.log(`[Email] ${subjectLabel} sent to ${to}: ${info.messageId}`);
     return NextResponse.json({ success: true, messageId: info.messageId });
   } catch (error: any) {
     console.error("[Email] Send failed:", error);

@@ -293,21 +293,23 @@ export default function Home() {
     downloadAsText(lines.join('\n'), `speaker_${short}_${name}_${new Date().toISOString().slice(0,10)}.txt`);
   };
 
-  const sendSummaryEmail = async () => {
-    if (!forwardEmail || !result?.summary) return;
+  const sendEmail = async (type: 'refined' | 'summary') => {
+    const content = type === 'refined' ? result?.refinedText : result?.summary;
+    if (!forwardEmail || !content) return;
     setIsSending(true);
     try {
-      const preview = result.segments
+      const preview = type === 'summary' ? result.segments
         .slice(0, 20)
         .map((s: any) => `[${s.speaker.replace('SPEAKER_','話者')}] ${s.text}`)
-        .join('\n');
+        .join('\n') : undefined;
       const res = await fetch('/api/send-summary', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           to: forwardEmail,
-          summary: result.summary,
-          title: file?.name?.replace(/\.[^.]+$/, '') || undefined,
+          summary: type === 'summary' ? content : undefined,
+          refinedText: type === 'refined' ? content : undefined,
+          type,
           speakers: speakerNames,
           transcriptPreview: preview,
         }),
@@ -1003,13 +1005,13 @@ export default function Home() {
               )}
 
               {/* Email Forward Section */}
-              {result.summary && (
+              {(result.refinedText || result.summary) && (
                 <div className="lg:col-span-2 bg-slate-800/40 border border-slate-700 rounded-2xl p-5">
                   <h3 className="text-sm font-medium text-slate-300 mb-4 flex items-center gap-2">
                     <Mail className="w-4 h-4 text-sky-400" />
-                    要約をメールで転送
+                    メールで転送
                   </h3>
-                  <div className="flex gap-3">
+                  <div className="flex gap-3 mb-3">
                     <input
                       type="email"
                       placeholder="転送先メールアドレスを入力"
@@ -1017,24 +1019,48 @@ export default function Home() {
                       onChange={e => updateForwardEmail(e.target.value)}
                       className="flex-1 bg-slate-900/60 border border-slate-600 rounded-xl px-4 py-2.5 text-sm text-slate-200 placeholder-slate-500 focus:border-sky-500 focus:outline-none transition-colors"
                     />
-                    <button
-                      onClick={sendSummaryEmail}
-                      disabled={!forwardEmail || isSending || emailSent}
-                      className={`px-5 py-2.5 rounded-xl text-sm font-medium flex items-center gap-2 transition-all
-                        ${emailSent 
-                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' 
-                          : isSending 
-                            ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
-                            : 'bg-sky-500/20 text-sky-300 border border-sky-500/30 hover:bg-sky-500/30'}`}
-                    >
-                      {emailSent ? (
-                        <><CheckCircle2 className="w-4 h-4" /> 送信完了</>
-                      ) : isSending ? (
-                        <><Loader2 className="w-4 h-4 animate-spin" /> 送信中...</>
-                      ) : (
-                        <><Send className="w-4 h-4" /> 送信</>
-                      )}
-                    </button>
+                  </div>
+                  <div className="flex gap-3">
+                    {result.refinedText && (
+                      <button
+                        onClick={() => sendEmail('refined')}
+                        disabled={!forwardEmail || isSending || emailSent}
+                        className={`flex-1 px-5 py-2.5 rounded-xl text-sm font-medium flex items-center justify-center gap-2 transition-all
+                          ${emailSent 
+                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' 
+                            : isSending 
+                              ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
+                              : 'bg-purple-500/20 text-purple-300 border border-purple-500/30 hover:bg-purple-500/30'}`}
+                      >
+                        {emailSent ? (
+                          <><CheckCircle2 className="w-4 h-4" /> 送信完了</>
+                        ) : isSending ? (
+                          <><Loader2 className="w-4 h-4 animate-spin" /> 送信中...</>
+                        ) : (
+                          <><Send className="w-4 h-4" /> 推敲文を送信</>
+                        )}
+                      </button>
+                    )}
+                    {result.summary && (
+                      <button
+                        onClick={() => sendEmail('summary')}
+                        disabled={!forwardEmail || isSending || emailSent}
+                        className={`flex-1 px-5 py-2.5 rounded-xl text-sm font-medium flex items-center justify-center gap-2 transition-all
+                          ${emailSent 
+                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' 
+                            : isSending 
+                              ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
+                              : 'bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30'}`}
+                      >
+                        {emailSent ? (
+                          <><CheckCircle2 className="w-4 h-4" /> 送信完了</>
+                        ) : isSending ? (
+                          <><Loader2 className="w-4 h-4 animate-spin" /> 送信中...</>
+                        ) : (
+                          <><Send className="w-4 h-4" /> 要約文を送信</>
+                        )}
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
