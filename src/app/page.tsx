@@ -523,7 +523,8 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           segments: result.segments,
-          speaker_names: getCombinedSpeakerNames(),
+          speaker_names: speakerNames,
+          speaker_readings: speakerReadings,
         }),
       });
       console.log('[Refine] Response status:', response.status, response.statusText);
@@ -559,7 +560,8 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           segments: result.segments,
-          speaker_names: getCombinedSpeakerNames(),
+          speaker_names: speakerNames,
+          speaker_readings: speakerReadings,
         }),
       });
       if (!response.ok) throw new Error(`サーバーエラー (${response.status})`);
@@ -943,9 +945,29 @@ export default function Home() {
                       </button>
                       <button
                         onClick={() => downloadAsText(result.refinedText, `refined_${new Date().toISOString().slice(0,10)}.txt`)}
-                        className="p-2 hover:bg-purple-500/20 rounded-lg transition-colors" title="ダウンロード">
+                        className="p-2 hover:bg-purple-500/20 rounded-lg transition-colors" title="全体ダウンロード">
                         <Download className="w-4 h-4 text-purple-400" />
                       </button>
+                      {uniqueSpeakers.length > 1 && (
+                        <div className="relative group">
+                          <button className="p-2 hover:bg-purple-500/20 rounded-lg transition-colors" title="人物別ダウンロード">
+                            <Users className="w-4 h-4 text-purple-400" />
+                          </button>
+                          <div className="absolute right-0 top-full mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-20 min-w-[160px]">
+                            {uniqueSpeakers.map(sp => {
+                              const name = speakerNames[sp] || sp.replace('SPEAKER_', '話者');
+                              return (
+                                <button key={sp} onClick={() => {
+                                  const lines = result.refinedText.split('\n').filter((l: string) => l.includes(`[${name}]`));
+                                  downloadAsText(lines.join('\n'), `refined_${name}_${new Date().toISOString().slice(0,10)}.txt`);
+                                }} className="w-full text-left px-3 py-2 text-sm text-slate-300 hover:bg-slate-700 first:rounded-t-lg last:rounded-b-lg">
+                                  {name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div className="relative z-10 text-slate-200 leading-loose whitespace-pre-wrap max-h-[600px] overflow-y-auto">
