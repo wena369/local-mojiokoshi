@@ -934,8 +934,8 @@ export default function Home() {
               {/* Refined Text View */}
               {result.refinedText && (
                 <div className="bg-gradient-to-br from-purple-900/20 to-indigo-900/20 border border-purple-500/20 rounded-3xl p-6 md:p-8 relative overflow-hidden">
-                  <div className="absolute top-0 right-0 w-64 h-64 bg-purple-500/10 blur-[100px] rounded-full" />
-                  <div className="flex items-center justify-between mb-6">
+                  <div className="absolute top-0 right-0 w-64 h-64 bg-purple-500/10 blur-[100px] rounded-full pointer-events-none" />
+                  <div className="flex items-center justify-between mb-6 relative z-10">
                     <h3 className="font-medium text-purple-300 text-sm uppercase tracking-wider flex items-center gap-2">
                       <Sparkles className="w-4 h-4" /> AI 推敲済みテキスト
                     </h3>
@@ -980,8 +980,8 @@ export default function Home() {
               {/* Summary View */}
               {result.summary && (
                 <div className="lg:col-span-2 bg-gradient-to-br from-amber-900/15 to-orange-900/15 border border-amber-500/20 rounded-3xl p-6 md:p-8 relative overflow-hidden">
-                  <div className="absolute top-0 left-0 w-80 h-80 bg-amber-500/5 blur-[120px] rounded-full" />
-                  <div className="flex items-center justify-between mb-6">
+                  <div className="absolute top-0 left-0 w-80 h-80 bg-amber-500/5 blur-[120px] rounded-full pointer-events-none" />
+                  <div className="flex items-center justify-between mb-6 relative z-10">
                     <h3 className="font-medium text-amber-300 text-sm uppercase tracking-wider flex items-center gap-2">
                       <BookOpen className="w-4 h-4" /> 要約
                     </h3>
