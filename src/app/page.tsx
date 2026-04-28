@@ -588,7 +588,9 @@ export default function Home() {
             <Volume2 className="w-8 h-8 text-indigo-400" />
           </div>
           <h1 className="text-4xl md:text-6xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-indigo-200 via-white to-indigo-200">
-            ローカルAI文字起こし
+            ゆるパカ鑑賞会
+            <br />
+            <span className="text-3xl md:text-4xl">ローカルAI文字起こし</span>
           </h1>
           <p className="text-lg text-slate-400 max-w-2xl mx-auto leading-relaxed">
             完全オフライン・無料で動く高精度な文字起こしアプリ。
