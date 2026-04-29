@@ -65,6 +65,7 @@ export default function Home() {
   const [copied, setCopied] = useState<string | null>(null);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [speakerReadings, setSpeakerReadings] = useState<Record<string, string>>({});
+  const [speakerRoles, setSpeakerRoles] = useState<Record<string, string>>({});
   const [forwardEmail, setForwardEmail] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
@@ -527,6 +528,7 @@ export default function Home() {
           segments: result.segments,
           speaker_names: speakerNames,
           speaker_readings: speakerReadings,
+          speaker_roles: speakerRoles,
         }),
       });
       console.log('[Refine] Response status:', response.status, response.statusText);
@@ -564,6 +566,7 @@ export default function Home() {
           segments: result.segments,
           speaker_names: speakerNames,
           speaker_readings: speakerReadings,
+          speaker_roles: speakerRoles,
         }),
       });
       if (!response.ok) throw new Error(`サーバーエラー (${response.status})`);
@@ -821,8 +824,17 @@ export default function Home() {
                         placeholder="ふりがな（任意）"
                         value={speakerReadings[sp] || ''}
                         onChange={e => updateSpeakerReading(sp, e.target.value)}
-                        className="w-40 bg-slate-900/60 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-500 focus:border-indigo-500 focus:outline-none transition-colors"
+                        className="w-32 bg-slate-900/60 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-500 focus:border-indigo-500 focus:outline-none transition-colors"
                       />
+                      <select
+                        value={speakerRoles[sp] || '参加者'}
+                        onChange={e => setSpeakerRoles(prev => ({ ...prev, [sp]: e.target.value }))}
+                        className="w-28 bg-slate-900/60 border border-slate-600 rounded-lg px-2 py-1.5 text-xs text-slate-300 focus:border-indigo-500 focus:outline-none transition-colors"
+                      >
+                        <option value="参加者">参加者</option>
+                        <option value="アーティスト">アーティスト</option>
+                        <option value="ファシリテーター">ファシリテーター</option>
+                      </select>
                       <button
                         onClick={() => downloadSpeakerTranscript(sp)}
                         title={`${sp.replace('SPEAKER_','話者')} の発言を個別ダウンロード（前後の会話コンテキスト付き）`}
@@ -972,6 +984,21 @@ export default function Home() {
                           </div>
                         </div>
                       )}
+                    </div>
+                  </div>
+                  {/* Participant list with roles */}
+                  <div className="relative z-10 mb-4 p-3 bg-purple-500/5 border border-purple-500/10 rounded-xl">
+                    <p className="text-xs text-purple-300/70 mb-2 font-medium">参加者一覧</p>
+                    <div className="flex flex-wrap gap-2">
+                      {uniqueSpeakers.map(sp => {
+                        const name = speakerNames[sp] || sp.replace('SPEAKER_', '話者');
+                        const role = speakerRoles[sp] || '参加者';
+                        return (
+                          <span key={sp} className="text-sm text-purple-200/90">
+                            {name}（{role}）
+                          </span>
+                        );
+                      })}
                     </div>
                   </div>
                   <div className="relative z-10 text-slate-200 leading-loose whitespace-pre-wrap max-h-[600px] overflow-y-auto">
