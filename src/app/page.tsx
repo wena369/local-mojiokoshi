@@ -834,6 +834,7 @@ export default function Home() {
                         <option value="参加者">参加者</option>
                         <option value="アーティスト">アーティスト</option>
                         <option value="ファシリテーター">ファシリテーター</option>
+                        <option value="オブザーバー">オブザーバー</option>
                       </select>
                       <button
                         onClick={() => downloadSpeakerTranscript(sp)}
