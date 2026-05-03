@@ -346,13 +346,17 @@ export default function Home() {
 
   const handleFileSelection = (selectedFile: File | undefined) => {
     if (!selectedFile) return;
-    // Check MIME type first, then fall back to extension check for iPhone/unusual formats
-    const validExtensions = ['.mp3','.wav','.m4a','.mp4','.ogg','.flac','.aac','.wma','.webm','.mov','.avi','.mkv','.caf','.aiff','.opus','.3gp','.amr'];
-    const ext = '.' + selectedFile.name.split('.').pop()?.toLowerCase();
-    if (selectedFile.type.startsWith("audio/") || selectedFile.type.startsWith("video/") || validExtensions.includes(ext)) {
+    // Accept any audio/video file - ffmpeg on the backend handles all format conversion
+    const validExtensions = ['.mp3','.wav','.m4a','.mp4','.ogg','.flac','.aac','.wma','.webm','.mov','.avi','.mkv','.caf','.aiff','.opus','.3gp','.amr','.m4v','.m4b','.m4r'];
+    const ext = '.' + (selectedFile.name.split('.').pop()?.toLowerCase() || '');
+    const isAudioVideo = selectedFile.type.startsWith('audio/') || selectedFile.type.startsWith('video/');
+    const isValidExt = validExtensions.includes(ext);
+    // On iPhone, MIME type may be empty or 'application/octet-stream' - trust the user's selection
+    const isMobileFile = !selectedFile.type || selectedFile.type === 'application/octet-stream';
+    if (isAudioVideo || isValidExt || isMobileFile) {
       setFile(selectedFile);
     } else {
-      alert("音声または動画ファイルを選択してください。\n対応形式: MP3, WAV, M4A, MP4, MOV, OGG, FLAC, AAC, WebM, AVI, MKV, CAFなど");
+      alert(`選択されたファイルは対応していません。\nファイル名: ${selectedFile.name}\nタイプ: ${selectedFile.type || '不明'}\n\n対応形式: MP3, WAV, M4A, MP4, MOV, OGG, FLAC, AAC, WebM, AVI, MKV, CAFなど`);
     }
   };
 
@@ -626,7 +630,7 @@ export default function Home() {
                 ref={fileInputRef} 
                 onChange={(e) => e.target.files && handleFileSelection(e.target.files[0])} 
                 className="hidden" 
-                accept="audio/*,video/*"
+                accept=".mp3,.wav,.m4a,.mp4,.mov,.caf,.ogg,.flac,.aac,.wma,.webm,.avi,.mkv,.aiff,.opus,.3gp,.amr,audio/*,video/*"
               />
               
               {!file ? (
