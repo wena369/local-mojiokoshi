@@ -346,10 +346,13 @@ export default function Home() {
 
   const handleFileSelection = (selectedFile: File | undefined) => {
     if (!selectedFile) return;
-    if (selectedFile.type.startsWith("audio/") || selectedFile.type.startsWith("video/")) {
+    // Check MIME type first, then fall back to extension check for iPhone/unusual formats
+    const validExtensions = ['.mp3','.wav','.m4a','.mp4','.ogg','.flac','.aac','.wma','.webm','.mov','.avi','.mkv','.caf','.aiff','.opus','.3gp','.amr'];
+    const ext = '.' + selectedFile.name.split('.').pop()?.toLowerCase();
+    if (selectedFile.type.startsWith("audio/") || selectedFile.type.startsWith("video/") || validExtensions.includes(ext)) {
       setFile(selectedFile);
     } else {
-      alert("音声または動画ファイルを選択してください。");
+      alert("音声または動画ファイルを選択してください。\n対応形式: MP3, WAV, M4A, MP4, MOV, OGG, FLAC, AAC, WebM, AVI, MKV, CAFなど");
     }
   };
 
@@ -632,11 +635,17 @@ export default function Home() {
                   <UploadCloud className={`w-16 h-16 mb-6 transition-colors duration-300 ${isDragging ? "text-indigo-400" : "text-slate-500 group-hover:text-indigo-400"}`} />
                   <h3 className="text-xl font-semibold mb-2">音声・動画ファイルをドロップ</h3>
                   <p className="text-slate-400 text-sm mb-6">または クリックしてファイルを選択</p>
-                  <div className="flex items-center gap-4 text-xs font-medium text-slate-500">
+                  <div className="flex flex-wrap items-center justify-center gap-2 text-xs font-medium text-slate-500">
                     <span className="px-3 py-1 bg-slate-800 rounded-full border border-slate-700">MP3</span>
                     <span className="px-3 py-1 bg-slate-800 rounded-full border border-slate-700">WAV</span>
                     <span className="px-3 py-1 bg-slate-800 rounded-full border border-slate-700">M4A</span>
                     <span className="px-3 py-1 bg-slate-800 rounded-full border border-slate-700">MP4</span>
+                    <span className="px-3 py-1 bg-slate-800 rounded-full border border-slate-700">MOV</span>
+                    <span className="px-3 py-1 bg-slate-800 rounded-full border border-slate-700">CAF</span>
+                    <span className="px-3 py-1 bg-slate-800 rounded-full border border-slate-700">OGG</span>
+                    <span className="px-3 py-1 bg-slate-800 rounded-full border border-slate-700">FLAC</span>
+                    <span className="px-3 py-1 bg-slate-800 rounded-full border border-slate-700">WebM</span>
+                    <span className="px-2 py-1 text-slate-600">etc.</span>
                   </div>
                 </>
               ) : (
