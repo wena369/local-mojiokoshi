@@ -519,15 +519,29 @@ export default function Home() {
     }
   };
 
-  // Step 2: Refine with speaker names
+  // Helper: poll a job until complete
+  const pollJob = async (jobId: string, backend: string): Promise<any> => {
+    while (true) {
+      await new Promise(r => setTimeout(r, 3000));
+      const res = await fetch(`${backend}/status/${jobId}`);
+      if (!res.ok) throw new Error(`ステータス確認エラー (${res.status})`);
+      const status = await res.json();
+      if (status.status === "completed") return status.result || status;
+      if (status.status === "error") throw new Error(status.result?.error || "処理中にエラーが発生しました");
+      // still processing - update progress if available
+      if (status.step) {
+        setProgress({ step: `🔄 ${status.step}`, percent: 50 });
+      }
+    }
+  };
+
+  // Step 2: Refine with speaker names (async polling)
   const handleRefine = async () => {
     if (!result?.segments || isRefining) return;
     setIsRefining(true);
     setErrorMsg(null);
-    console.log('[Refine] Starting with', result.segments.length, 'segments, speakers:', JSON.stringify(speakerNames));
     try {
       const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "/api";
-      console.log('[Refine] Sending to:', `${BACKEND}/refine`);
       const response = await fetch(`${BACKEND}/refine`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -538,18 +552,19 @@ export default function Home() {
           speaker_roles: speakerRoles,
         }),
       });
-      console.log('[Refine] Response status:', response.status, response.statusText);
       if (!response.ok) throw new Error(`サーバーエラー (${response.status})`);
       const data = await response.json();
-      console.log('[Refine] Response data keys:', Object.keys(data));
-      console.log('[Refine] refinedText exists:', !!data.refinedText, 'length:', data.refinedText?.length);
-      console.log('[Refine] error:', data.error);
-      if (data.error) throw new Error(data.error);
-      if (data.refinedText) {
+      // Async mode: backend returns jobId
+      if (data.jobId) {
+        const jobResult = await pollJob(data.jobId, BACKEND);
+        if (jobResult.refinedText) {
+          setResult((prev: any) => ({ ...prev, refinedText: jobResult.refinedText }));
+        }
+      // Legacy sync mode: direct result
+      } else if (data.refinedText) {
         setResult((prev: any) => ({ ...prev, refinedText: data.refinedText }));
-        console.log('[Refine] setResult called with refinedText');
-      } else {
-        console.log('[Refine] WARNING: No refinedText in response!', JSON.stringify(data).slice(0, 500));
+      } else if (data.error) {
+        throw new Error(data.error);
       }
     } catch (error: any) {
       console.error('[Refine] Error:', error);
@@ -559,7 +574,7 @@ export default function Home() {
     }
   };
 
-  // Step 3: Summarize with speaker names
+  // Step 3: Summarize with speaker names (async polling)
   const handleSummarize = async () => {
     if (!result?.segments || isSummarizing) return;
     setIsSummarizing(true);
@@ -578,9 +593,17 @@ export default function Home() {
       });
       if (!response.ok) throw new Error(`サーバーエラー (${response.status})`);
       const data = await response.json();
-      if (data.error) throw new Error(data.error);
-      if (data.summary) {
+      // Async mode
+      if (data.jobId) {
+        const jobResult = await pollJob(data.jobId, BACKEND);
+        if (jobResult.summary) {
+          setResult((prev: any) => ({ ...prev, summary: jobResult.summary }));
+        }
+      // Legacy sync mode
+      } else if (data.summary) {
         setResult((prev: any) => ({ ...prev, summary: data.summary }));
+      } else if (data.error) {
+        throw new Error(data.error);
       }
     } catch (error: any) {
       setErrorMsg(`要約エラー: ${error.message}`);
