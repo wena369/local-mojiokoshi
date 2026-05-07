@@ -29,22 +29,33 @@ function saveSpeakerNames(names: string[]) {
 }
 
 const SPEAKER_COLORS = [
-  { bg: 'bg-indigo-500/20', text: 'text-indigo-300', border: 'border-indigo-500/30', dot: 'bg-indigo-400' },
-  { bg: 'bg-emerald-500/20', text: 'text-emerald-300', border: 'border-emerald-500/30', dot: 'bg-emerald-400' },
-  { bg: 'bg-amber-500/20', text: 'text-amber-300', border: 'border-amber-500/30', dot: 'bg-amber-400' },
-  { bg: 'bg-rose-500/20', text: 'text-rose-300', border: 'border-rose-500/30', dot: 'bg-rose-400' },
-  { bg: 'bg-cyan-500/20', text: 'text-cyan-300', border: 'border-cyan-500/30', dot: 'bg-cyan-400' },
-  { bg: 'bg-violet-500/20', text: 'text-violet-300', border: 'border-violet-500/30', dot: 'bg-violet-400' },
-  { bg: 'bg-lime-500/20', text: 'text-lime-300', border: 'border-lime-500/30', dot: 'bg-lime-400' },
-  { bg: 'bg-pink-500/20', text: 'text-pink-300', border: 'border-pink-500/30', dot: 'bg-pink-400' },
-  { bg: 'bg-teal-500/20', text: 'text-teal-300', border: 'border-teal-500/30', dot: 'bg-teal-400' },
-  { bg: 'bg-orange-500/20', text: 'text-orange-300', border: 'border-orange-500/30', dot: 'bg-orange-400' },
-  { bg: 'bg-sky-500/20', text: 'text-sky-300', border: 'border-sky-500/30', dot: 'bg-sky-400' },
-  { bg: 'bg-fuchsia-500/20', text: 'text-fuchsia-300', border: 'border-fuchsia-500/30', dot: 'bg-fuchsia-400' },
-  { bg: 'bg-yellow-500/20', text: 'text-yellow-300', border: 'border-yellow-500/30', dot: 'bg-yellow-400' },
-  { bg: 'bg-red-500/20', text: 'text-red-300', border: 'border-red-500/30', dot: 'bg-red-400' },
-  { bg: 'bg-blue-500/20', text: 'text-blue-300', border: 'border-blue-500/30', dot: 'bg-blue-400' },
-  { bg: 'bg-green-500/20', text: 'text-green-300', border: 'border-green-500/30', dot: 'bg-green-400' },
+  { bg: 'bg-teal-500/20', text: 'text-teal-200', border: 'border-teal-400/30', dot: 'bg-teal-400' },
+  { bg: 'bg-coral-500/20 bg-orange-400/15', text: 'text-orange-200', border: 'border-orange-400/30', dot: 'bg-orange-400' },
+  { bg: 'bg-sky-500/20', text: 'text-sky-200', border: 'border-sky-400/30', dot: 'bg-sky-400' },
+  { bg: 'bg-amber-500/15', text: 'text-amber-200', border: 'border-amber-400/30', dot: 'bg-amber-400' },
+  { bg: 'bg-emerald-500/15', text: 'text-emerald-200', border: 'border-emerald-400/30', dot: 'bg-emerald-400' },
+  { bg: 'bg-rose-500/15', text: 'text-rose-200', border: 'border-rose-400/30', dot: 'bg-rose-400' },
+  { bg: 'bg-cyan-500/20', text: 'text-cyan-200', border: 'border-cyan-400/30', dot: 'bg-cyan-400' },
+  { bg: 'bg-violet-500/15', text: 'text-violet-200', border: 'border-violet-400/30', dot: 'bg-violet-400' },
+  { bg: 'bg-lime-500/15', text: 'text-lime-200', border: 'border-lime-400/30', dot: 'bg-lime-400' },
+  { bg: 'bg-pink-500/15', text: 'text-pink-200', border: 'border-pink-400/30', dot: 'bg-pink-400' },
+  { bg: 'bg-indigo-500/15', text: 'text-indigo-200', border: 'border-indigo-400/30', dot: 'bg-indigo-400' },
+  { bg: 'bg-fuchsia-500/15', text: 'text-fuchsia-200', border: 'border-fuchsia-400/30', dot: 'bg-fuchsia-400' },
+  { bg: 'bg-yellow-500/15', text: 'text-yellow-200', border: 'border-yellow-400/30', dot: 'bg-yellow-400' },
+  { bg: 'bg-red-500/15', text: 'text-red-200', border: 'border-red-400/30', dot: 'bg-red-400' },
+  { bg: 'bg-blue-500/15', text: 'text-blue-200', border: 'border-blue-400/30', dot: 'bg-blue-400' },
+  { bg: 'bg-green-500/15', text: 'text-green-200', border: 'border-green-400/30', dot: 'bg-green-400' },
+];
+
+// Alpaca messages for processing stages
+const PACA_MESSAGES = [
+  { emoji: '🦙💨', text: 'パカパカ走って音声を取りに行ってます...' },
+  { emoji: '🦙🎧', text: 'パカが音声をじっくり聴いています...' },
+  { emoji: '🦙✍️', text: 'パカが一生懸命書き起こしています...' },
+  { emoji: '🦙🔍', text: 'パカが誰が話しているか調べています...' },
+  { emoji: '🦙✨', text: 'パカが丁寧に推敲しています...' },
+  { emoji: '🦙📝', text: 'パカが要約をまとめています...' },
+  { emoji: '🦙🏖️', text: 'もう少しで完了です！パカも夏休みが楽しみ...' },
 ];
 
 function getSpeakerColor(speakerId: string) {
@@ -613,19 +624,25 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-950 text-white selection:bg-indigo-500/30">
-      <div className="max-w-5xl mx-auto px-6 py-12">
+    <div className="min-h-screen bg-gradient-to-br from-[#0c1929] via-[#0e2a3d] to-[#162544] text-white selection:bg-teal-400/30">
+      {/* Summer decorative elements */}
+      <div className="fixed inset-0 pointer-events-none overflow-hidden">
+        <div className="absolute top-0 right-0 w-[600px] h-[600px] bg-gradient-to-bl from-teal-500/8 to-transparent rounded-full blur-3xl" />
+        <div className="absolute bottom-0 left-0 w-[500px] h-[500px] bg-gradient-to-tr from-sky-500/6 to-transparent rounded-full blur-3xl" />
+        <div className="absolute top-1/3 left-1/4 w-[300px] h-[300px] bg-gradient-to-br from-orange-400/5 to-transparent rounded-full blur-3xl" />
+      </div>
+      <div className="relative max-w-5xl mx-auto px-6 py-12">
         {/* Header Section */}
-        <header className="text-center mb-16 space-y-4">
-          <div className="inline-flex items-center justify-center p-3 bg-indigo-500/10 rounded-2xl mb-4 border border-indigo-500/20 shadow-[0_0_30px_-5px_rgba(99,102,241,0.3)]">
-            <Volume2 className="w-8 h-8 text-indigo-400" />
+        <header className="text-center mb-16 space-y-5">
+          <div className="inline-flex items-center justify-center gap-3 mb-4">
+            <span className="text-5xl" style={{animation: 'float 3s ease-in-out infinite'}}>🦙</span>
           </div>
-          <h1 className="text-4xl md:text-6xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-indigo-200 via-white to-indigo-200">
-            ゆるパカ鑑賞会
+          <h1 className="text-5xl md:text-7xl font-extrabold tracking-tight">
+            <span className="text-transparent bg-clip-text bg-gradient-to-r from-teal-300 via-cyan-200 to-sky-300">ゆるパカ鑑賞会</span>
             <br />
-            <span className="text-3xl md:text-4xl">ローカルAI文字起こし</span>
+            <span className="text-3xl md:text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-orange-300 via-amber-200 to-yellow-300">ローカルAI文字起こし</span>
           </h1>
-          <p className="text-lg text-slate-400 max-w-2xl mx-auto leading-relaxed">
+          <p className="text-lg text-cyan-100/60 max-w-2xl mx-auto leading-relaxed">
             完全オフライン・無料で動く高精度な文字起こしアプリ。
             機密性の高い音声データも、外部に送信することなく安全にテキスト化します。
           </p>
@@ -644,8 +661,8 @@ export default function Home() {
                 relative overflow-hidden group cursor-pointer
                 border-2 border-dashed rounded-3xl p-12 transition-all duration-300
                 flex flex-col items-center justify-center min-h-[320px] bg-slate-900/50 backdrop-blur-sm
-                ${isDragging ? "border-indigo-400 bg-indigo-500/10 scale-[1.02]" : "border-slate-700 hover:border-indigo-500/50 hover:bg-slate-800/80"}
-                ${file ? "border-emerald-500/50 bg-emerald-500/5" : ""}
+                ${isDragging ? "border-teal-400 bg-teal-500/10 scale-[1.02]" : "border-cyan-800/40 hover:border-teal-400/50 hover:bg-[#0e2a3d]/80"}
+                ${file ? "border-teal-400/50 bg-teal-500/5" : ""}
               `}
             >
               <input 
@@ -659,9 +676,9 @@ export default function Home() {
               {!file ? (
                 <>
                   <div className="absolute inset-0 bg-gradient-to-t from-indigo-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-                  <UploadCloud className={`w-16 h-16 mb-6 transition-colors duration-300 ${isDragging ? "text-indigo-400" : "text-slate-500 group-hover:text-indigo-400"}`} />
+                  <UploadCloud className={`w-16 h-16 mb-6 transition-colors duration-300 ${isDragging ? "text-teal-400" : "text-cyan-700 group-hover:text-teal-400"}`} />
                   <h3 className="text-xl font-semibold mb-2">音声・動画ファイルをドロップ</h3>
-                  <p className="text-slate-400 text-sm mb-6">または クリックしてファイルを選択</p>
+                  <p className="text-cyan-200/40 text-base mb-6">または クリックしてファイルを選択</p>
                   <div className="flex flex-wrap items-center justify-center gap-2 text-xs font-medium text-slate-500">
                     <span className="px-3 py-1 bg-slate-800 rounded-full border border-slate-700">MP3</span>
                     <span className="px-3 py-1 bg-slate-800 rounded-full border border-slate-700">WAV</span>
@@ -694,23 +711,28 @@ export default function Home() {
 
             {/* Progress Bar (Visible when processing) */}
             {isProcessing && (
-              <div className="bg-slate-800/80 backdrop-blur border border-slate-700 rounded-2xl p-6 shadow-xl animate-in fade-in slide-in-from-bottom-4">
-                <div className="flex justify-between items-center mb-3">
-                  <div className="flex items-center gap-3">
-                    <Loader2 className="w-5 h-5 text-indigo-400 animate-spin" />
-                    <span className="font-medium text-slate-200">{progress.step}</span>
-                  </div>
-                  <span className="text-indigo-300 font-mono text-sm">{progress.percent}%</span>
+              <div className="bg-[#0e2a3d]/90 backdrop-blur-lg border border-teal-500/20 rounded-2xl p-6 shadow-xl shadow-teal-500/5 animate-in fade-in slide-in-from-bottom-4">
+                <div className="text-center mb-4">
+                  <span className="text-4xl inline-block" style={{animation: 'wave 1s ease-in-out infinite'}}>
+                    {PACA_MESSAGES[Math.min(Math.floor(progress.percent / 15), PACA_MESSAGES.length - 1)].emoji}
+                  </span>
+                  <p className="text-base text-cyan-100/70 mt-2">
+                    {PACA_MESSAGES[Math.min(Math.floor(progress.percent / 15), PACA_MESSAGES.length - 1)].text}
+                  </p>
                 </div>
-                <div className="h-2 w-full bg-slate-900 rounded-full overflow-hidden">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="font-medium text-cyan-100 text-sm">{progress.step}</span>
+                  <span className="text-teal-300 font-mono text-sm">{progress.percent}%</span>
+                </div>
+                <div className="h-2.5 w-full bg-[#0c1929] rounded-full overflow-hidden">
                   <div 
-                    className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-500 ease-out"
+                    className="h-full bg-gradient-to-r from-teal-500 via-cyan-400 to-sky-400 transition-all duration-500 ease-out rounded-full"
                     style={{ width: `${progress.percent}%` }}
                   />
                 </div>
                 <button
                   onClick={cancelJob}
-                  className="mt-4 w-full py-2.5 px-4 rounded-xl text-sm font-medium bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-all flex items-center justify-center gap-2"
+                  className="mt-4 w-full py-2.5 px-4 rounded-xl text-sm font-medium bg-red-500/10 text-red-300 border border-red-500/20 hover:bg-red-500/20 transition-all flex items-center justify-center gap-2"
                 >
                   <AlertCircle className="w-4 h-4" /> 処理を中止する
                 </button>
@@ -720,10 +742,10 @@ export default function Home() {
 
           {/* Sidebar Options Column */}
           <div className="lg:col-span-4 space-y-6">
-            <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700 rounded-3xl p-6 shadow-xl">
-              <div className="flex items-center gap-2 mb-6 pb-4 border-b border-slate-700">
-                <Settings className="w-5 h-5 text-indigo-400" />
-                <h3 className="font-semibold text-lg">AI 処理オプション</h3>
+            <div className="bg-[#0e2a3d]/60 backdrop-blur-sm border border-cyan-800/30 rounded-3xl p-6 shadow-xl">
+              <div className="flex items-center gap-2 mb-6 pb-4 border-b border-cyan-800/30">
+                <Settings className="w-5 h-5 text-teal-400" />
+                <h3 className="font-semibold text-lg text-cyan-50">AI 処理オプション</h3>
               </div>
 
               <div className="space-y-4">
@@ -786,8 +808,8 @@ export default function Home() {
                   w-full mt-8 py-4 px-6 rounded-xl font-bold text-lg shadow-lg transition-all duration-300
                   flex items-center justify-center gap-2
                   ${!file || isProcessing 
-                    ? "bg-slate-700 text-slate-400 cursor-not-allowed" 
-                    : "bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-400 hover:to-purple-500 text-white hover:shadow-indigo-500/25 hover:-translate-y-0.5"
+                    ? "bg-[#1a3a4d] text-cyan-700 cursor-not-allowed" 
+                    : "bg-gradient-to-r from-teal-500 to-cyan-500 hover:from-teal-400 hover:to-cyan-400 text-white hover:shadow-teal-500/25 hover:-translate-y-0.5"
                   }
                 `}
               >
@@ -826,16 +848,16 @@ export default function Home() {
         {result && (
           <div className="mt-12 animate-in fade-in slide-in-from-bottom-8 duration-700">
             <div className="flex items-center justify-between mb-6">
-              <h2 className="text-2xl font-bold flex items-center gap-3">
-                <CheckCircle2 className="text-emerald-400" />
+              <h2 className="text-2xl font-bold flex items-center gap-3 text-cyan-50">
+                <CheckCircle2 className="text-teal-400" />
                 文字起こし結果
-                <span className="text-sm font-normal text-slate-400">({result.segments.length} セグメント / {uniqueSpeakers.length} 話者)</span>
+                <span className="text-sm font-normal text-cyan-300/50">({result.segments.length} セグメント / {uniqueSpeakers.length} 話者)</span>
               </h2>
             </div>
 
             {/* Speaker Name Mapping */}
             {uniqueSpeakers.length > 1 && (
-              <div className="mb-8 bg-slate-800/40 border border-slate-700 rounded-2xl p-5">
+              <div className="mb-8 bg-[#0e2a3d]/60 border border-cyan-800/30 rounded-2xl p-5">
                 <h3 className="text-sm font-medium text-slate-300 mb-4 flex items-center gap-2">
                   <Users className="w-4 h-4" />
                   話者名を設定（ダウンロード時にヘッダーに記載されます）
@@ -974,7 +996,7 @@ export default function Home() {
                           <Clock className="w-3 h-3" />
                           {formatTime(segment.start)} - {formatTime(segment.end)}
                         </div>
-                        <div className="bg-slate-900/60 border border-slate-700 rounded-2xl rounded-tl-none px-4 py-3 text-slate-200 text-sm leading-relaxed">
+                        <div className="bg-[#0e2a3d]/60 border border-cyan-800/30 rounded-2xl rounded-tl-none px-4 py-3 text-cyan-50 text-base leading-relaxed">
                           {segment.text}
                         </div>
                       </div>
@@ -985,8 +1007,8 @@ export default function Home() {
 
               {/* Refined Text View */}
               {result.refinedText && (
-                <div className="bg-gradient-to-br from-purple-900/20 to-indigo-900/20 border border-purple-500/20 rounded-3xl p-6 md:p-8 relative overflow-hidden">
-                  <div className="absolute top-0 right-0 w-64 h-64 bg-purple-500/10 blur-[100px] rounded-full pointer-events-none" />
+                <div className="bg-gradient-to-br from-teal-900/20 to-cyan-900/20 border border-teal-500/20 rounded-3xl p-6 md:p-8 relative overflow-hidden">
+                  <div className="absolute top-0 right-0 w-64 h-64 bg-teal-500/10 blur-[100px] rounded-full pointer-events-none" />
                   <div className="flex items-center justify-between mb-6 relative z-10">
                     <h3 className="font-medium text-purple-300 text-sm uppercase tracking-wider flex items-center gap-2">
                       <Sparkles className="w-4 h-4" /> AI 推敲済みテキスト
@@ -1039,7 +1061,7 @@ export default function Home() {
                       })}
                     </div>
                   </div>
-                  <div className="relative z-10 text-slate-200 leading-loose whitespace-pre-wrap max-h-[600px] overflow-y-auto">
+                  <div className="relative z-10 text-cyan-50 text-base leading-loose whitespace-pre-wrap max-h-[600px] overflow-y-auto">
                     {result.refinedText}
                   </div>
                 </div>
@@ -1065,7 +1087,7 @@ export default function Home() {
                       </button>
                     </div>
                   </div>
-                  <div className="relative z-10 text-slate-200 leading-loose whitespace-pre-wrap max-h-[800px] overflow-y-auto prose prose-invert prose-sm max-w-none">
+                  <div className="relative z-10 text-cyan-50 text-base leading-loose whitespace-pre-wrap max-h-[800px] overflow-y-auto prose prose-invert prose-base max-w-none">
                     {result.summary}
                   </div>
                 </div>
