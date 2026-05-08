@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useMemo, useEffect, useCallback } from "react";
-import { UploadCloud, FileAudio, CheckCircle2, Settings, Loader2, PlayCircle, FileText, Sparkles, Volume2, Copy, Download, Clock, AlertCircle, Users, BookOpen, Mail, Send } from "lucide-react";
+import { UploadCloud, FileAudio, CheckCircle2, Settings, Loader2, PlayCircle, FileText, Sparkles, Volume2, Copy, Download, Clock, AlertCircle, Users, BookOpen, Mail, Send, Server, Wifi, WifiOff } from "lucide-react";
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -12,6 +12,38 @@ function formatTime(seconds: number): string {
 const LS_SPEAKER_NAMES_KEY = 'ai-transcriber-speaker-names';
 const LS_EMAIL_KEY = 'ai-transcriber-forward-email';
 const LS_JOB_KEY = 'ai-transcriber-pending-job';
+const LS_SERVER_KEY = 'ai-transcriber-backend-server';
+
+// バックエンドサーバー定義
+interface BackendServer {
+  id: string;
+  name: string;
+  backendUrl: string;  // FastAPI の Tailscale Funnel URL
+  gpu: string;
+  llmModel: string;
+  description: string;
+  online?: boolean;
+  gpuInfo?: string;    // ヘルスチェックで取得
+}
+
+const BACKEND_SERVERS: BackendServer[] = [
+  {
+    id: 'egpu-pc',
+    name: 'eGPU PC',
+    backendUrl: 'https://nucboxm7.goat-aldebaran.ts.net',
+    gpu: 'RTX 5060 Ti (16GB)',
+    llmModel: 'Gemma 4 e4b',
+    description: 'WhisperX + Gemma 4',
+  },
+  {
+    id: 'remote-pc',
+    name: 'リモートPC',
+    backendUrl: '',  // TODO: Tailscale Funnel設定後に入れる
+    gpu: 'GPU (22GB)',
+    llmModel: 'Qwen3.6 27B',
+    description: 'WhisperX + Qwen 27B',
+  },
+];
 
 function loadSavedNames(): string[] {
   try {
@@ -81,7 +113,47 @@ export default function Home() {
   const [isSending, setIsSending] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
   const [savedNamesList, setSavedNamesList] = useState<string[]>([]);
+  const [backendServers, setBackendServers] = useState<BackendServer[]>(BACKEND_SERVERS);
+  const [selectedServerId, setSelectedServerId] = useState<string>('egpu-pc');
+  const [checkingServers, setCheckingServers] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+
+  // 選択中のバックエンドサーバー情報を取得
+  const selectedServer = useMemo(() => {
+    return backendServers.find(s => s.id === selectedServerId) || backendServers[0];
+  }, [backendServers, selectedServerId]);
+
+  // 各バックエンドのヘルスチェック
+  const checkBackendServers = useCallback(async () => {
+    setCheckingServers(true);
+    const updated = await Promise.all(
+      backendServers.map(async (server) => {
+        if (!server.backendUrl) return { ...server, online: false, gpuInfo: '未設定' };
+        try {
+          const res = await fetch(`${server.backendUrl}/`, { signal: AbortSignal.timeout(5000) });
+          if (res.ok) {
+            const data = await res.json();
+            return {
+              ...server,
+              online: true,
+              gpuInfo: data.gpu || server.gpu,
+            };
+          }
+          return { ...server, online: false };
+        } catch {
+          return { ...server, online: false };
+        }
+      })
+    );
+    setBackendServers(updated);
+    setCheckingServers(false);
+  }, [backendServers]);
+
+  // サーバー選択をlocalStorageに保存
+  const selectServer = useCallback((serverId: string) => {
+    setSelectedServerId(serverId);
+    try { localStorage.setItem(LS_SERVER_KEY, serverId); } catch {}
+  }, []);
 
   const cancelJob = useCallback(() => {
     if (abortRef.current) {
@@ -184,12 +256,17 @@ export default function Home() {
     }
   }, []);
 
-  // Load saved names, email, and pending job from localStorage on mount
+  // Load saved names, email, server selection, and pending job from localStorage on mount
   useEffect(() => {
     setSavedNamesList(loadSavedNames());
     try {
       const savedEmail = localStorage.getItem(LS_EMAIL_KEY);
       if (savedEmail) setForwardEmail(savedEmail);
+    } catch {}
+    // Load saved LM server selection
+    try {
+      const savedServer = localStorage.getItem(LS_SERVER_KEY);
+      if (savedServer) setSelectedServerId(savedServer);
     } catch {}
     // Auto-resume pending job
     try {
@@ -198,7 +275,9 @@ export default function Home() {
         resumePendingJob(pendingJob);
       }
     } catch {}
-  }, [resumePendingJob]);
+    // Check backend server status
+    checkBackendServers();
+  }, [resumePendingJob, checkBackendServers]);
 
   // Save speaker names to localStorage when they change
   const updateSpeakerName = useCallback((speakerId: string, name: string) => {
@@ -399,10 +478,10 @@ export default function Home() {
     setIsProcessing(true);
     setErrorMsg(null);
     setResult(null);
-    setProgress({ step: "📤 ファイルをeGPUにアップロード中...", percent: 5 });
+    setProgress({ step: `📤 ${selectedServer.name} にアップロード中...`, percent: 5 });
     
-    // Use direct backend URL to bypass Vercel's 4.5MB body limit
-    const BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "/api";
+    // Use selected backend server URL
+    const BASE_URL = selectedServer.backendUrl || process.env.NEXT_PUBLIC_BACKEND_URL || "/api";
 
     const formData = new FormData();
     formData.append("file", file);
@@ -552,7 +631,7 @@ export default function Home() {
     setIsRefining(true);
     setErrorMsg(null);
     try {
-      const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "/api";
+      const BACKEND = selectedServer.backendUrl || process.env.NEXT_PUBLIC_BACKEND_URL || "/api";
       const response = await fetch(`${BACKEND}/refine`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -591,7 +670,7 @@ export default function Home() {
     setIsSummarizing(true);
     setErrorMsg(null);
     try {
-      const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "/api";
+      const BACKEND = selectedServer.backendUrl || process.env.NEXT_PUBLIC_BACKEND_URL || "/api";
       const response = await fetch(`${BACKEND}/summarize`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -749,6 +828,86 @@ export default function Home() {
               </div>
 
               <div className="space-y-4">
+                {/* Backend Server Selector */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between px-1">
+                    <h3 className="text-sm font-medium text-slate-300 flex items-center gap-2">
+                      <Server className="w-4 h-4 text-violet-400" /> 処理サーバー
+                    </h3>
+                    <button
+                      onClick={checkBackendServers}
+                      disabled={checkingServers}
+                      className="text-xs text-slate-500 hover:text-slate-300 transition-colors flex items-center gap-1"
+                      title="サーバーの状態を再チェック"
+                    >
+                      <Loader2 className={`w-3 h-3 ${checkingServers ? 'animate-spin' : ''}`} />
+                      {checkingServers ? '確認中...' : '再チェック'}
+                    </button>
+                  </div>
+
+                  <div className="space-y-2">
+                    {backendServers.map(server => {
+                      const isSelected = selectedServerId === server.id;
+                      const isOnline = server.online;
+                      const isConfigured = !!server.backendUrl;
+                      return (
+                        <button
+                          key={server.id}
+                          onClick={() => isConfigured && selectServer(server.id)}
+                          disabled={isProcessing || isRefining || isSummarizing || !isConfigured}
+                          className={`
+                            w-full text-left p-3.5 rounded-xl border transition-all duration-200
+                            ${!isConfigured
+                              ? 'bg-slate-900/20 border-slate-800/30 opacity-40 cursor-not-allowed'
+                              : isSelected 
+                                ? 'bg-violet-500/15 border-violet-400/40 shadow-md shadow-violet-500/5' 
+                                : 'bg-slate-900/30 border-slate-700/50 hover:border-slate-600 hover:bg-slate-800/40'}
+                            ${(isProcessing || isRefining || isSummarizing) ? 'opacity-50 cursor-not-allowed' : ''}
+                          `}
+                        >
+                          <div className="flex items-center gap-3">
+                            {/* Radio indicator */}
+                            <div className={`
+                              w-4 h-4 rounded-full border-2 flex items-center justify-center flex-shrink-0
+                              ${isSelected ? 'border-violet-400' : 'border-slate-500'}
+                            `}>
+                              {isSelected && <div className="w-2 h-2 rounded-full bg-violet-400" />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className={`text-sm font-semibold ${isSelected ? 'text-violet-200' : 'text-slate-300'}`}>
+                                  {server.name}
+                                </span>
+                                {isConfigured && isOnline !== undefined && (
+                                  isOnline ? (
+                                    <span className="flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-400/10 px-1.5 py-0.5 rounded-full">
+                                      <Wifi className="w-2.5 h-2.5" /> ON
+                                    </span>
+                                  ) : (
+                                    <span className="flex items-center gap-1 text-[10px] text-red-400 bg-red-400/10 px-1.5 py-0.5 rounded-full">
+                                      <WifiOff className="w-2.5 h-2.5" /> OFF
+                                    </span>
+                                  )
+                                )}
+                                {!isConfigured && (
+                                  <span className="text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded-full">
+                                    準備中
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2 mt-1">
+                                <span className="text-[11px] text-slate-500">{server.gpuInfo || server.gpu}</span>
+                                <span className="text-[10px] text-slate-600">·</span>
+                                <span className="text-[11px] text-slate-500">{server.llmModel}</span>
+                              </div>
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 {/* Processing Info Panel */}
                 <div className="space-y-3">
                   <h3 className="text-sm font-medium text-slate-300 px-1 flex items-center gap-2">
