@@ -127,7 +127,7 @@ export default function Home() {
   const checkBackendServers = useCallback(async () => {
     setCheckingServers(true);
     const updated = await Promise.all(
-      backendServers.map(async (server) => {
+      BACKEND_SERVERS.map(async (server) => {
         if (!server.backendUrl) return { ...server, online: false, gpuInfo: '未設定' };
         try {
           const res = await fetch(`${server.backendUrl}/`, { signal: AbortSignal.timeout(5000) });
@@ -147,7 +147,7 @@ export default function Home() {
     );
     setBackendServers(updated);
     setCheckingServers(false);
-  }, [backendServers]);
+  }, []);
 
   // サーバー選択をlocalStorageに保存
   const selectServer = useCallback((serverId: string) => {
