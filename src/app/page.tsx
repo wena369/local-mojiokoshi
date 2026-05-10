@@ -38,7 +38,7 @@ const BACKEND_SERVERS: BackendServer[] = [
   {
     id: 'remote-pc',
     name: 'リモートPC',
-    backendUrl: '',  // TODO: Tailscale Funnel設定後に入れる
+    backendUrl: 'https://nucbox-m8.goat-aldebaran.ts.net',
     gpu: 'GPU (22GB)',
     llmModel: 'Qwen3.6 27B',
     description: 'WhisperX + Qwen 27B',
@@ -130,18 +130,18 @@ export default function Home() {
       BACKEND_SERVERS.map(async (server) => {
         if (!server.backendUrl) return { ...server, online: false, gpuInfo: '未設定' };
         try {
-          const res = await fetch(`${server.backendUrl}/`, { signal: AbortSignal.timeout(5000) });
+          const res = await fetch(`${server.backendUrl}/`, { signal: AbortSignal.timeout(10000) });
           if (res.ok) {
             const data = await res.json();
             return {
               ...server,
               online: true,
-              gpuInfo: data.gpu || server.gpu,
+              gpuInfo: data.gpu && data.gpu !== 'N/A' ? data.gpu : server.gpu,
             };
           }
-          return { ...server, online: false };
+          return { ...server, online: false, gpuInfo: server.gpu };
         } catch {
-          return { ...server, online: false };
+          return { ...server, online: false, gpuInfo: server.gpu };
         }
       })
     );
