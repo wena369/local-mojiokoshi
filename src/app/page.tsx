@@ -891,16 +891,15 @@ export default function Home() {
                                 <span className={`text-sm font-semibold ${isSelected ? 'text-violet-200' : 'text-slate-300'}`}>
                                   {server.name}
                                 </span>
-                                {isConfigured && isOnline !== undefined && (
-                                  isOnline ? (
+                                {isConfigured && isOnline === true && (
                                     <span className="flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-400/10 px-1.5 py-0.5 rounded-full">
                                       <Wifi className="w-2.5 h-2.5" /> ON
                                     </span>
-                                  ) : (
-                                    <span className="flex items-center gap-1 text-[10px] text-red-400 bg-red-400/10 px-1.5 py-0.5 rounded-full">
-                                      <WifiOff className="w-2.5 h-2.5" /> OFF
+                                )}
+                                {isConfigured && isOnline === false && (
+                                    <span className="flex items-center gap-1 text-[10px] text-slate-400 bg-slate-700/40 px-1.5 py-0.5 rounded-full">
+                                      未確認
                                     </span>
-                                  )
                                 )}
                                 {!isConfigured && (
                                   <span className="text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded-full">
