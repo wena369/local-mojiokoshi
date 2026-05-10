@@ -123,29 +123,30 @@ export default function Home() {
     return backendServers.find(s => s.id === selectedServerId) || backendServers[0];
   }, [backendServers, selectedServerId]);
 
-  // 各バックエンドのヘルスチェック
+  // 各バックエンドのヘルスチェック（サーバーサイドプロキシ経由でCORS回避）
   const checkBackendServers = useCallback(async () => {
     setCheckingServers(true);
-    const updated = await Promise.all(
-      BACKEND_SERVERS.map(async (server) => {
-        if (!server.backendUrl) return { ...server, online: false, gpuInfo: '未設定' };
-        try {
-          const res = await fetch(`${server.backendUrl}/`, { signal: AbortSignal.timeout(10000) });
-          if (res.ok) {
-            const data = await res.json();
+    try {
+      const res = await fetch('/api/health');
+      if (res.ok) {
+        const results = await res.json();
+        const updated = BACKEND_SERVERS.map(server => {
+          const health = results[server.id];
+          if (health && health.online) {
             return {
               ...server,
               online: true,
-              gpuInfo: data.gpu && data.gpu !== 'N/A' ? data.gpu : server.gpu,
+              gpuInfo: health.gpu && health.gpu !== 'N/A' ? health.gpu : server.gpu,
             };
           }
           return { ...server, online: false, gpuInfo: server.gpu };
-        } catch {
-          return { ...server, online: false, gpuInfo: server.gpu };
-        }
-      })
-    );
-    setBackendServers(updated);
+        });
+        setBackendServers(updated);
+      }
+    } catch {
+      // Proxy itself failed - mark all as unknown
+      setBackendServers(BACKEND_SERVERS.map(s => ({ ...s, online: false, gpuInfo: s.gpu })));
+    }
     setCheckingServers(false);
   }, []);
 
