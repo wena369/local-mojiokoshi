@@ -123,30 +123,42 @@ export default function Home() {
     return backendServers.find(s => s.id === selectedServerId) || backendServers[0];
   }, [backendServers, selectedServerId]);
 
-  // 各バックエンドのヘルスチェック（サーバーサイドプロキシ経由でCORS回避）
+  // 各バックエンドのヘルスチェック（ブラウザから直接）
   const checkBackendServers = useCallback(async () => {
     setCheckingServers(true);
-    try {
-      const res = await fetch('/api/health');
-      if (res.ok) {
-        const results = await res.json();
-        const updated = BACKEND_SERVERS.map(server => {
-          const health = results[server.id];
-          if (health && health.online) {
+    const updated = await Promise.all(
+      BACKEND_SERVERS.map(async (server) => {
+        if (!server.backendUrl) return { ...server, online: false, gpuInfo: '未設定' };
+        try {
+          const res = await fetch(`${server.backendUrl}/`, {
+            signal: AbortSignal.timeout(10000),
+            mode: 'cors',
+          });
+          if (res.ok) {
+            const data = await res.json();
             return {
               ...server,
               online: true,
-              gpuInfo: health.gpu && health.gpu !== 'N/A' ? health.gpu : server.gpu,
+              gpuInfo: data.gpu && data.gpu !== 'N/A' ? data.gpu : server.gpu,
             };
           }
           return { ...server, online: false, gpuInfo: server.gpu };
-        });
-        setBackendServers(updated);
-      }
-    } catch {
-      // Proxy itself failed - mark all as unknown
-      setBackendServers(BACKEND_SERVERS.map(s => ({ ...s, online: false, gpuInfo: s.gpu })));
-    }
+        } catch {
+          // CORS error still means server is reachable - try no-cors ping
+          try {
+            const ping = await fetch(`${server.backendUrl}/`, {
+              signal: AbortSignal.timeout(5000),
+              mode: 'no-cors',
+            });
+            // no-cors returns opaque response (status 0) but means server is up
+            return { ...server, online: true, gpuInfo: server.gpu };
+          } catch {
+            return { ...server, online: false, gpuInfo: server.gpu };
+          }
+        }
+      })
+    );
+    setBackendServers(updated);
     setCheckingServers(false);
   }, []);
 
