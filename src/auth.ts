@@ -2,7 +2,7 @@ import NextAuth from "next-auth";
 import Google from "next-auth/providers/google";
 
 // Allowed email addresses (whitelist)
-const ALLOWED_EMAILS = (process.env.ALLOWED_EMAILS || "wena369@gmail.com")
+const ALLOWED_EMAILS = (process.env.ALLOWED_EMAILS || "wena369@gmail.com,wena@enartsu.co.jp,wena@369.co.jp")
   .split(",")
   .map((e) => e.trim().toLowerCase());
 
