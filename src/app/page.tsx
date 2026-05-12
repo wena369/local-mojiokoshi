@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useState, useRef, useMemo, useEffect, useCallback } from "react";
-import { UploadCloud, FileAudio, CheckCircle2, Settings, Loader2, PlayCircle, FileText, Sparkles, Volume2, Copy, Download, Clock, AlertCircle, Users, BookOpen, Mail, Send, Server, Wifi, WifiOff } from "lucide-react";
+import { useSession } from "next-auth/react";
+import { UploadCloud, FileAudio, CheckCircle2, Settings, Loader2, PlayCircle, FileText, Sparkles, Volume2, Copy, Download, Clock, AlertCircle, Users, BookOpen, Mail, Send, Server, Wifi, WifiOff, Save, FolderOpen, Trash2 } from "lucide-react";
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -13,6 +14,38 @@ const LS_SPEAKER_NAMES_KEY = 'ai-transcriber-speaker-names';
 const LS_EMAIL_KEY = 'ai-transcriber-forward-email';
 const LS_JOB_KEY = 'ai-transcriber-pending-job';
 const LS_SERVER_KEY = 'ai-transcriber-backend-server';
+const LS_SESSIONS_KEY = 'ai-transcriber-sessions';
+
+// 保存セッション型定義
+interface SavedSession {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  fileName: string;
+  serverId: string;
+  segments: any[];
+  speakerNames: Record<string, string>;
+  speakerReadings: Record<string, string>;
+  speakerRoles: Record<string, string>;
+  refinedText: string | null;
+  summary: string | null;
+}
+
+function loadSessions(): SavedSession[] {
+  try {
+    const raw = localStorage.getItem(LS_SESSIONS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function saveSessions(sessions: SavedSession[]) {
+  try {
+    localStorage.setItem(LS_SESSIONS_KEY, JSON.stringify(sessions));
+  } catch (e) {
+    console.error('Failed to save sessions:', e);
+  }
+}
 
 // バックエンドサーバー定義
 interface BackendServer {
@@ -40,8 +73,8 @@ const BACKEND_SERVERS: BackendServer[] = [
     name: 'リモートPC',
     backendUrl: 'https://nucbox-m8.goat-aldebaran.ts.net',
     gpu: 'GPU (22GB)',
-    llmModel: 'Qwen3.6 27B',
-    description: 'WhisperX + Qwen 27B',
+    llmModel: 'Gemma 4 26B',
+    description: 'WhisperX + Gemma 4',
   },
 ];
 
@@ -96,6 +129,7 @@ function getSpeakerColor(speakerId: string) {
 }
 
 export default function Home() {
+  const { data: session } = useSession();
   const [file, setFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   
@@ -113,6 +147,12 @@ export default function Home() {
   const [isSending, setIsSending] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
   const [savedNamesList, setSavedNamesList] = useState<string[]>([]);
+  // 管理者 & セッション保存
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [savedSessionsList, setSavedSessionsList] = useState<SavedSession[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [showSessionsPanel, setShowSessionsPanel] = useState(false);
+  const [saveToast, setSaveToast] = useState(false);
   const [backendServers, setBackendServers] = useState<BackendServer[]>(BACKEND_SERVERS);
   const [selectedServerId, setSelectedServerId] = useState<string>('egpu-pc');
   const [checkingServers, setCheckingServers] = useState(false);
@@ -288,15 +328,97 @@ export default function Home() {
         resumePendingJob(pendingJob);
       }
     } catch {}
+    // Load saved sessions list
+    setSavedSessionsList(loadSessions());
     // Check backend server status
     checkBackendServers();
   }, [resumePendingJob, checkBackendServers]);
 
-  // Save speaker names to localStorage when they change
+  // Admin check: call /api/admin-check when session changes
+  useEffect(() => {
+    if (session?.user?.email) {
+      fetch('/api/admin-check')
+        .then(r => r.json())
+        .then(data => setIsAdmin(data.isAdmin === true))
+        .catch(() => setIsAdmin(false));
+    } else {
+      setIsAdmin(false);
+    }
+  }, [session]);
+
+  // セッション保存（管理者専用）
+  const saveCurrentSession = useCallback(() => {
+    if (!result?.segments || !isAdmin) return;
+    const now = new Date().toISOString();
+    const fileName = file?.name || '不明なファイル';
+    const title = fileName.replace(/\.[^.]+$/, '');
+
+    const sessionData: SavedSession = {
+      id: currentSessionId || `session_${Date.now()}`,
+      title,
+      createdAt: currentSessionId
+        ? savedSessionsList.find(s => s.id === currentSessionId)?.createdAt || now
+        : now,
+      updatedAt: now,
+      fileName,
+      serverId: selectedServerId,
+      segments: result.segments,
+      speakerNames: { ...speakerNames },
+      speakerReadings: { ...speakerReadings },
+      speakerRoles: { ...speakerRoles },
+      refinedText: result.refinedText || null,
+      summary: result.summary || null,
+    };
+
+    const existing = loadSessions();
+    const idx = existing.findIndex(s => s.id === sessionData.id);
+    if (idx >= 0) {
+      existing[idx] = sessionData;
+    } else {
+      existing.unshift(sessionData);
+    }
+    // 最大50セッションまで保持
+    const trimmed = existing.slice(0, 50);
+    saveSessions(trimmed);
+    setSavedSessionsList(trimmed);
+    setCurrentSessionId(sessionData.id);
+    setSaveToast(true);
+    setTimeout(() => setSaveToast(false), 3000);
+  }, [result, isAdmin, file, currentSessionId, savedSessionsList, selectedServerId, speakerNames, speakerReadings, speakerRoles]);
+
+  // セッション読み込み
+  const loadSession = useCallback((sessionId: string) => {
+    const sessions = loadSessions();
+    const target = sessions.find(s => s.id === sessionId);
+    if (!target) return;
+    setResult({
+      segments: target.segments,
+      refinedText: target.refinedText,
+      summary: target.summary,
+    });
+    setSpeakerNames(target.speakerNames || {});
+    setSpeakerReadings(target.speakerReadings || {});
+    setSpeakerRoles(target.speakerRoles || {});
+    setCurrentSessionId(target.id);
+    setFile(null);
+    setErrorMsg(null);
+    setShowSessionsPanel(false);
+  }, []);
+
+  // セッション削除
+  const deleteSession = useCallback((sessionId: string) => {
+    const sessions = loadSessions().filter(s => s.id !== sessionId);
+    saveSessions(sessions);
+    setSavedSessionsList(sessions);
+    if (currentSessionId === sessionId) {
+      setCurrentSessionId(null);
+    }
+  }, [currentSessionId]);
+
+  // Save speaker names to localStorage when they change (for autocomplete)
   const updateSpeakerName = useCallback((speakerId: string, name: string) => {
     setSpeakerNames(prev => {
       const next = { ...prev, [speakerId]: name };
-      // Save all non-empty names to the saved list
       const allNames = [...savedNamesList, ...Object.values(next)];
       saveSpeakerNames(allNames);
       setSavedNamesList(loadSavedNames());
@@ -308,6 +430,9 @@ export default function Home() {
     setSpeakerReadings(prev => ({ ...prev, [speakerId]: reading }));
   }, []);
 
+  const updateSpeakerRole = useCallback((speakerId: string, role: string) => {
+    setSpeakerRoles(prev => ({ ...prev, [speakerId]: role }));
+  }, []);
   // Combine name + reading for backend
   const getCombinedSpeakerNames = useCallback(() => {
     const combined: Record<string, string> = {};
@@ -993,6 +1118,75 @@ export default function Home() {
                   </>
                 )}
               </button>
+
+              {/* 管理者専用: 保存済みセッション一覧 */}
+              {isAdmin && (
+                <div className="mt-6">
+                  <button
+                    onClick={() => setShowSessionsPanel(!showSessionsPanel)}
+                    className="w-full flex items-center justify-between px-4 py-3 rounded-xl text-sm font-medium bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 hover:bg-emerald-500/20 transition-all"
+                  >
+                    <span className="flex items-center gap-2">
+                      <FolderOpen className="w-4 h-4" />
+                      保存済みデータ ({savedSessionsList.length})
+                    </span>
+                    <span className="text-xs">{showSessionsPanel ? '▲' : '▼'}</span>
+                  </button>
+
+                  {showSessionsPanel && (
+                    <div className="mt-3 space-y-2 max-h-[400px] overflow-y-auto pr-1">
+                      {savedSessionsList.length === 0 ? (
+                        <p className="text-xs text-slate-500 text-center py-4">保存済みデータはありません</p>
+                      ) : (
+                        savedSessionsList.map(s => (
+                          <div
+                            key={s.id}
+                            className={`p-3 rounded-xl border transition-all cursor-pointer group ${
+                              currentSessionId === s.id
+                                ? 'bg-emerald-500/10 border-emerald-500/30'
+                                : 'bg-slate-900/40 border-slate-700/50 hover:border-slate-600 hover:bg-slate-800/40'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div
+                                className="flex-1 min-w-0 cursor-pointer"
+                                onClick={() => loadSession(s.id)}
+                              >
+                                <p className="text-sm font-medium text-slate-200 truncate">{s.title}</p>
+                                <p className="text-[10px] text-slate-500 mt-1">
+                                  {new Date(s.updatedAt).toLocaleString('ja-JP', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                </p>
+                                <div className="flex gap-1.5 mt-1.5">
+                                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-400">
+                                    ✅ 生データ ({s.segments.length})
+                                  </span>
+                                  {s.refinedText && (
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400">✅ 推敲</span>
+                                  )}
+                                  {s.summary && (
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">✅ 要約</span>
+                                  )}
+                                </div>
+                              </div>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (confirm(`「${s.title}」を削除しますか？`))
+                                    deleteSession(s.id);
+                                }}
+                                className="p-1.5 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-red-500/20 transition-all"
+                                title="削除"
+                              >
+                                <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1015,6 +1209,13 @@ export default function Home() {
           </div>
         )}
 
+        {/* Save Toast */}
+        {saveToast && (
+          <div className="fixed bottom-6 right-6 bg-emerald-500 text-white px-4 py-2.5 rounded-lg shadow-lg text-sm font-medium z-50 flex items-center gap-2 animate-in fade-in slide-in-from-bottom-4">
+            <Save className="w-4 h-4" /> 保存しました
+          </div>
+        )}
+
         {/* Results Section */}
         {result && (
           <div className="mt-12 animate-in fade-in slide-in-from-bottom-8 duration-700">
@@ -1024,6 +1225,16 @@ export default function Home() {
                 文字起こし結果
                 <span className="text-sm font-normal text-cyan-300/50">({result.segments.length} セグメント / {uniqueSpeakers.length} 話者)</span>
               </h2>
+              {isAdmin && (
+                <button
+                  onClick={saveCurrentSession}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25 transition-all hover:scale-105 active:scale-95"
+                  title="現在の結果を保存"
+                >
+                  <Save className="w-4 h-4" />
+                  {currentSessionId ? '上書き保存' : '保存'}
+                </button>
+              )}
             </div>
 
             {/* Speaker Name Mapping */}
