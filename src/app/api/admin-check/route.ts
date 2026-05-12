@@ -1,7 +1,7 @@
 import { auth } from "@/auth";
 import { NextResponse } from "next/server";
 
-const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "")
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "wena369@gmail.com")
   .split(",")
   .map((e) => e.trim().toLowerCase())
   .filter(Boolean);
