@@ -62,7 +62,7 @@ interface BackendServer {
 const BACKEND_SERVERS: BackendServer[] = [
   {
     id: 'egpu-pc',
-    name: 'eGPU PC',
+    name: 'eGPU',
     backendUrl: 'https://nucboxm7.goat-aldebaran.ts.net',
     gpu: 'RTX 5060 Ti (16GB)',
     llmModel: 'Gemma 4 e4b',
@@ -70,10 +70,10 @@ const BACKEND_SERVERS: BackendServer[] = [
   },
   {
     id: 'remote-pc',
-    name: 'リモートPC',
+    name: 'eGPU2（予備）',
     backendUrl: 'https://nucbox-m8.goat-aldebaran.ts.net',
-    gpu: 'GPU (22GB)',
-    llmModel: 'Gemma 4 26B',
+    gpu: 'RTX 2080 Ti (22GB)',
+    llmModel: 'Gemma 4 e4b',
     description: 'WhisperX + Gemma 4',
   },
 ];
