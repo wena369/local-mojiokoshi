@@ -72,7 +72,7 @@ const BACKEND_SERVERS: BackendServer[] = [
     id: 'remote-pc',
     name: 'eGPU2（予備）',
     backendUrl: 'https://nucbox-m8.goat-aldebaran.ts.net',
-    gpu: 'RTX 2080 Ti (22GB)',
+    gpu: 'RTX2080 Ti (22GB)',
     llmModel: 'Gemma 4 e4b',
     description: 'WhisperX + Gemma 4',
   },
