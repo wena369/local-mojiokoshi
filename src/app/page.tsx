@@ -179,7 +179,7 @@ export default function Home() {
             return {
               ...server,
               online: true,
-              gpuInfo: data.gpu && data.gpu !== 'N/A' ? data.gpu : server.gpu,
+              gpuInfo: server.gpu,
             };
           }
           return { ...server, online: false, gpuInfo: server.gpu };
