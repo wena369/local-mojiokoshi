@@ -156,6 +156,7 @@ export default function Home() {
   const [backendServers, setBackendServers] = useState<BackendServer[]>(BACKEND_SERVERS);
   const [selectedServerId, setSelectedServerId] = useState<string>('egpu-pc');
   const [checkingServers, setCheckingServers] = useState(false);
+  const [extraSpeakers, setExtraSpeakers] = useState<string[]>([]);  // 手動追加された話者
   const abortRef = useRef<AbortController | null>(null);
 
   // 選択中のバックエンドサーバー情報を取得
@@ -457,11 +458,39 @@ export default function Home() {
     return Array.from(seen).sort();
   }, [result]);
 
+  // セグメントの話者 + 手動追加の話者を統合
+  const allSpeakers = useMemo(() => {
+    const merged = new Set([...uniqueSpeakers, ...extraSpeakers]);
+    return Array.from(merged).sort();
+  }, [uniqueSpeakers, extraSpeakers]);
+
   const getSpeakerLabel = (speakerId: string) => {
     const name = speakerNames[speakerId];
     const short = speakerId.replace('SPEAKER_', '話者');
     return name ? `${short} (${name})` : short;
   };
+
+  // 話者追加: 次の番号を自動採番
+  const addSpeaker = useCallback(() => {
+    const allIds = [...uniqueSpeakers, ...extraSpeakers];
+    const maxNum = allIds.reduce((max, sp) => {
+      const m = sp.match(/SPEAKER_(\d+)/);
+      return m ? Math.max(max, parseInt(m[1])) : max;
+    }, -1);
+    const newId = `SPEAKER_${String(maxNum + 1).padStart(2, '0')}`;
+    setExtraSpeakers(prev => [...prev, newId]);
+  }, [uniqueSpeakers, extraSpeakers]);
+
+  // 話者削除: セグメントで使われていない場合のみ削除可能
+  const removeSpeaker = useCallback((speakerId: string) => {
+    // セグメントで使用中なら削除不可
+    if (uniqueSpeakers.includes(speakerId)) return;
+    setExtraSpeakers(prev => prev.filter(s => s !== speakerId));
+    // 名前・役割もクリア
+    setSpeakerNames(prev => { const n = { ...prev }; delete n[speakerId]; return n; });
+    setSpeakerReadings(prev => { const n = { ...prev }; delete n[speakerId]; return n; });
+    setSpeakerRoles(prev => { const n = { ...prev }; delete n[speakerId]; return n; });
+  }, [uniqueSpeakers]);
 
   // ---- セグメント編集操作 ----
   const updateSegmentText = useCallback((idx: number, newText: string) => {
@@ -1280,15 +1309,16 @@ export default function Home() {
             </div>
 
             {/* Speaker Name Mapping */}
-            {uniqueSpeakers.length > 1 && (
+            {allSpeakers.length > 0 && (
               <div className="mb-8 bg-[#0e2a3d]/60 border border-cyan-800/30 rounded-2xl p-5">
                 <h3 className="text-sm font-medium text-slate-300 mb-4 flex items-center gap-2">
                   <Users className="w-4 h-4" />
                   話者名を設定（ダウンロード時にヘッダーに記載されます）
                 </h3>
                 <div className="grid grid-cols-1 gap-3">
-                  {uniqueSpeakers.map(sp => {
+                  {allSpeakers.map(sp => {
                     const c = getSpeakerColor(sp);
+                    const isInSegments = uniqueSpeakers.includes(sp);
                     return (
                     <div key={sp} className="flex items-center gap-2">
                       <div className={`w-3 h-3 rounded-full ${c.dot} flex-shrink-0`} />
@@ -1326,6 +1356,16 @@ export default function Home() {
                       >
                         <Download className="w-3.5 h-3.5" />
                       </button>
+                      {/* 削除ボタン: セグメントで未使用の話者のみ */}
+                      {!isInSegments && (
+                        <button
+                          onClick={() => removeSpeaker(sp)}
+                          title="この話者を削除"
+                          className="p-1.5 rounded-lg hover:bg-red-500/20 transition-colors flex-shrink-0"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                        </button>
+                      )}
                     </div>
                     );
                   })}
@@ -1334,6 +1374,14 @@ export default function Home() {
                       <option key={name} value={name} />
                     ))}
                   </datalist>
+                  {/* 話者追加ボタン */}
+                  <button
+                    onClick={addSpeaker}
+                    className="flex items-center gap-2 justify-center px-3 py-2 mt-1 rounded-xl text-sm font-medium bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 border-dashed hover:bg-cyan-500/20 hover:border-cyan-500/40 transition-all"
+                  >
+                    <CopyPlus className="w-4 h-4" />
+                    話者を追加
+                  </button>
                 </div>
 
                 {/* Action buttons: Refine & Summarize */}
@@ -1414,7 +1462,7 @@ export default function Home() {
                               onChange={(e) => updateSegmentSpeaker(idx, e.target.value)}
                               className={`appearance-none pl-2 pr-6 py-1 rounded-lg text-xs font-bold cursor-pointer border ${c.bg} ${c.text} ${c.border} bg-transparent focus:outline-none focus:ring-1 focus:ring-cyan-400/50`}
                             >
-                              {uniqueSpeakers.map(sp => (
+                              {allSpeakers.map(sp => (
                                 <option key={sp} value={sp} className="bg-slate-800 text-slate-200">
                                   {speakerNames[sp] || sp.replace('SPEAKER_', '話者')}
                                 </option>
