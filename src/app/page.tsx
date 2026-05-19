@@ -64,7 +64,7 @@ const BACKEND_SERVERS: BackendServer[] = [
     id: 'egpu-pc',
     name: 'eGPU',
     backendUrl: 'https://nucboxm7.goat-aldebaran.ts.net',
-    gpu: 'RTX 5060 Ti (16GB)',
+    gpu: 'TITAN RTX',
     llmModel: 'Gemma 4 e4b',
     description: 'WhisperX + Gemma 4',
   },
