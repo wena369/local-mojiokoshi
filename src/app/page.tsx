@@ -2,7 +2,7 @@
 
 import React, { useState, useRef, useMemo, useEffect, useCallback } from "react";
 import { useSession } from "next-auth/react";
-import { UploadCloud, FileAudio, CheckCircle2, Settings, Loader2, PlayCircle, FileText, Sparkles, Volume2, Copy, Download, Clock, AlertCircle, Users, BookOpen, Mail, Send, Server, Wifi, WifiOff, Save, FolderOpen, Trash2 } from "lucide-react";
+import { UploadCloud, FileAudio, CheckCircle2, Settings, Loader2, PlayCircle, FileText, Sparkles, Volume2, Copy, Download, Clock, AlertCircle, Users, BookOpen, Mail, Send, Server, Wifi, WifiOff, Save, FolderOpen, Trash2, CopyPlus, ChevronDown, Pencil } from "lucide-react";
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -462,6 +462,48 @@ export default function Home() {
     const short = speakerId.replace('SPEAKER_', '話者');
     return name ? `${short} (${name})` : short;
   };
+
+  // ---- セグメント編集操作 ----
+  const updateSegmentText = useCallback((idx: number, newText: string) => {
+    setResult((prev: any) => {
+      if (!prev?.segments) return prev;
+      const updated = [...prev.segments];
+      updated[idx] = { ...updated[idx], text: newText };
+      return { ...prev, segments: updated };
+    });
+  }, []);
+
+  const updateSegmentSpeaker = useCallback((idx: number, newSpeaker: string) => {
+    setResult((prev: any) => {
+      if (!prev?.segments) return prev;
+      const updated = [...prev.segments];
+      updated[idx] = { ...updated[idx], speaker: newSpeaker };
+      return { ...prev, segments: updated };
+    });
+  }, []);
+
+  const duplicateSegment = useCallback((idx: number) => {
+    setResult((prev: any) => {
+      if (!prev?.segments) return prev;
+      const updated = [...prev.segments];
+      const clone = { ...updated[idx] };
+      updated.splice(idx + 1, 0, clone);
+      return { ...prev, segments: updated };
+    });
+  }, []);
+
+  const deleteSegment = useCallback((idx: number) => {
+    setResult((prev: any) => {
+      if (!prev?.segments || prev.segments.length <= 1) return prev;
+      const updated = [...prev.segments];
+      updated.splice(idx, 1);
+      return { ...prev, segments: updated };
+    });
+  }, []);
+
+  const updateRefinedText = useCallback((newText: string) => {
+    setResult((prev: any) => prev ? { ...prev, refinedText: newText } : prev);
+  }, []);
 
   const buildDownloadHeader = () => {
     if (uniqueSpeakers.length === 0) return '';
@@ -1358,32 +1400,63 @@ export default function Home() {
                     </button>
                   </div>
                 </div>
-                <div className="space-y-4 max-h-[600px] overflow-y-auto pr-2">
-                  {result.segments.map((segment: any, idx: number) => (
-                    <div key={idx} className="flex gap-3 group">
-                      <div className="flex-shrink-0 mt-1">
-                        {(() => {
-                          const c = getSpeakerColor(segment.speaker);
-                          return (
-                            <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${c.bg} ${c.text} border ${c.border}`}
-                              title={speakerNames[segment.speaker] || segment.speaker}
+                <div className="space-y-3 max-h-[600px] overflow-y-auto pr-2">
+                  {result.segments.map((segment: any, idx: number) => {
+                    const c = getSpeakerColor(segment.speaker);
+                    return (
+                      <div key={`seg-${idx}-${segment.speaker}`} className="group relative">
+                        {/* Header: 話者選択 + タイムスタンプ + 操作ボタン */}
+                        <div className="flex items-center gap-2 mb-1">
+                          {/* 話者プルダウン */}
+                          <div className="relative">
+                            <select
+                              value={segment.speaker}
+                              onChange={(e) => updateSegmentSpeaker(idx, e.target.value)}
+                              className={`appearance-none pl-2 pr-6 py-1 rounded-lg text-xs font-bold cursor-pointer border ${c.bg} ${c.text} ${c.border} bg-transparent focus:outline-none focus:ring-1 focus:ring-cyan-400/50`}
                             >
-                              {segment.speaker.replace('SPEAKER_', '話者')}
-                            </div>
-                          );
-                        })()}
-                      </div>
-                      <div className="flex-1">
-                        <div className="text-[10px] text-slate-500 mb-1 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <Clock className="w-3 h-3" />
-                          {formatTime(segment.start)} - {formatTime(segment.end)}
+                              {uniqueSpeakers.map(sp => (
+                                <option key={sp} value={sp} className="bg-slate-800 text-slate-200">
+                                  {speakerNames[sp] || sp.replace('SPEAKER_', '話者')}
+                                </option>
+                              ))}
+                            </select>
+                            <ChevronDown className="w-3 h-3 absolute right-1.5 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400" />
+                          </div>
+                          {/* タイムスタンプ */}
+                          <span className="text-[10px] text-slate-500 flex items-center gap-1">
+                            <Clock className="w-3 h-3" />
+                            {formatTime(segment.start)} - {formatTime(segment.end)}
+                          </span>
+                          {/* 操作ボタン（ホバーで表示） */}
+                          <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                              onClick={() => duplicateSegment(idx)}
+                              className="p-1 hover:bg-cyan-500/20 rounded-md transition-colors" title="ブロックを複製"
+                            >
+                              <CopyPlus className="w-3.5 h-3.5 text-cyan-400" />
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (result.segments.length <= 1) return;
+                                deleteSegment(idx);
+                              }}
+                              disabled={result.segments.length <= 1}
+                              className="p-1 hover:bg-red-500/20 rounded-md transition-colors disabled:opacity-30" title="ブロックを削除"
+                            >
+                              <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                            </button>
+                          </div>
                         </div>
-                        <div className="bg-[#0e2a3d]/60 border border-cyan-800/30 rounded-2xl rounded-tl-none px-4 py-3 text-cyan-50 text-base leading-relaxed">
-                          {segment.text}
-                        </div>
+                        {/* 編集可能テキスト */}
+                        <textarea
+                          value={segment.text}
+                          onChange={(e) => updateSegmentText(idx, e.target.value)}
+                          rows={Math.max(2, Math.ceil(segment.text.length / 50))}
+                          className="w-full bg-[#0e2a3d]/60 border border-cyan-800/30 rounded-2xl rounded-tl-none px-4 py-3 text-cyan-50 text-base leading-relaxed resize-y focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20 transition-colors"
+                        />
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
 
@@ -1443,9 +1516,12 @@ export default function Home() {
                       })}
                     </div>
                   </div>
-                  <div className="relative z-10 text-cyan-50 text-base leading-loose whitespace-pre-wrap max-h-[600px] overflow-y-auto">
-                    {result.refinedText}
-                  </div>
+                  <textarea
+                    value={result.refinedText}
+                    onChange={(e) => updateRefinedText(e.target.value)}
+                    rows={Math.max(10, result.refinedText.split('\n').length)}
+                    className="relative z-10 w-full bg-transparent text-cyan-50 text-base leading-loose resize-y max-h-[600px] overflow-y-auto focus:outline-none focus:ring-1 focus:ring-purple-500/30 rounded-xl p-2 -m-2"
+                  />
                 </div>
               )}
               {/* Summary View */}
