@@ -535,12 +535,13 @@ export default function Home() {
   }, []);
 
   const buildDownloadHeader = () => {
-    if (uniqueSpeakers.length === 0) return '';
+    if (allSpeakers.length === 0) return '';
     const lines = ['=== 話者一覧 ==='];
-    uniqueSpeakers.forEach(sp => {
+    allSpeakers.forEach(sp => {
       const short = sp.replace('SPEAKER_', '話者');
       const name = speakerNames[sp] || '（未設定）';
-      lines.push(`${short} = ${name}`);
+      const role = speakerRoles[sp] || '参加者';
+      lines.push(`${short} = ${name}（${role}）`);
     });
     lines.push('================', '');
     return lines.join('\n');
@@ -1518,13 +1519,13 @@ export default function Home() {
                     </h3>
                     <div className="flex gap-2">
                       <button
-                        onClick={() => copyToClipboard(result.refinedText, '推敲テキスト')}
-                        className="p-2 hover:bg-purple-500/20 rounded-lg transition-colors" title="コピー">
+                        onClick={() => copyToClipboard(buildDownloadHeader() + result.refinedText, '推敲テキスト')}
+                        className="p-2 hover:bg-purple-500/20 rounded-lg transition-colors" title="コピー（話者一覧付き）">
                         <Copy className="w-4 h-4 text-purple-400" />
                       </button>
                       <button
-                        onClick={() => downloadAsText(result.refinedText, `refined_${new Date().toISOString().slice(0,10)}.txt`)}
-                        className="p-2 hover:bg-purple-500/20 rounded-lg transition-colors" title="全体ダウンロード">
+                        onClick={() => downloadAsText(buildDownloadHeader() + result.refinedText, `refined_${new Date().toISOString().slice(0,10)}.txt`)}
+                        className="p-2 hover:bg-purple-500/20 rounded-lg transition-colors" title="全体ダウンロード（話者一覧付き）">
                         <Download className="w-4 h-4 text-purple-400" />
                       </button>
                       {uniqueSpeakers.length > 1 && (
