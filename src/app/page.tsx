@@ -16,6 +16,77 @@ const LS_JOB_KEY = 'ai-transcriber-pending-job';
 const LS_SERVER_KEY = 'ai-transcriber-backend-server';
 const LS_SESSIONS_KEY = 'ai-transcriber-sessions';
 
+// LLM推論痕跡をフロントエンドで除去
+function stripThinking(text: string | null | undefined): string | null {
+  if (!text) return null;
+  // [話者名] が行途中にある場合、前に改行を挿入
+  let t = text.replace(/(?<!\n)(\[.+?\]\s)/g, '\n$1');
+  const lines = t.split('\n');
+  const cleaned: string[] = [];
+  let skipMode = false;
+  for (const line of lines) {
+    const s = line.trim();
+    // [話者名] で始まる行 → 常にコンテンツ
+    if (/^\[.+?\]\s/.test(s)) {
+      skipMode = false;
+      cleaned.push(line);
+      continue;
+    }
+    // skipMode中は全スキップ
+    if (skipMode) continue;
+    // メタブロック開始検出
+    if (isMetaLine(s)) {
+      skipMode = true;
+      continue;
+    }
+    // 空行は保持
+    if (!s) { cleaned.push(line); continue; }
+    // 通常テキスト
+    cleaned.push(line);
+  }
+  const result = cleaned.join('\n').replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n').trim();
+  return result || null;
+}
+
+function isMetaLine(s: string): boolean {
+  if (!s) return false;
+  // マークダウン太字ヘッダー (**何か:** 形式)
+  if (/^\*\*[^*]+[:：]/.test(s)) return true;
+  const patterns = [
+    /^ユーザーは/,
+    /^会議の文字起こしを推敲/,
+    /^文字起こしを推敲/,
+    /^提供された/,
+    /^以下の(ルール|指示|手順|編集)/,
+    /^以下は|^以下が|^以下の/,
+    /^(処理手順|処理方針|処理対象|指示事項|推敲実行|整形実行)/,
+    /^[0-9０-９]+[.．、]\s*(「|フィラー|句読点|自然|話者|内容|推敲|元の|整形)/,
+    /^[・\-\*]\s*(フィラー|句読点|自然|話者|内容|推敲|修正|変更|追加|削除|補足|元の|整形|全体)/,
+    /^（自己チェック|^\*自己チェック|^\(自己チェック/,
+    /^推敲結果|^推敲後|^推敲しました|^推敲済み/,
+    /^修正結果|^整形結果/,
+    /^以上が|^以上です|^以上、/,
+    /^---+$|^===+$|^\*\*\*+$/,
+    /^※|^注意[:：]|^メモ[:：]|^補足[:：]/,
+    /^.{0,30}(を推敲しました|を修正しました|を整形しました|を整えました)/,
+    /^.{0,20}(修正箇所|変更点|変更箇所)/,
+    /^このプロセスを実行/,
+    /^最終的な出力を生成/,
+    /^各発言を(チェック|確認|読み込)/,
+    /^全体を通して/,
+    /^文字起こし全体に対して/,
+    /^上記(プロセス|ルール|指示|に基づ|を適用|の)/,
+    /^元の(テキスト|文字起こし|データ)/,
+    /^フィラー(除去|を除去|（)/,
+    /^句読点(を|の)/,
+    /^(整形を|適用を|実施する|確認する|開始する)/,
+    /^(整形|適用|実施)[:：]/,
+    /^(Here is|Below is|The following|I've |I have |Note:|Let me|Okay|Sure|Certainly)/i,
+    /^[「〝『【].{0,40}(推敲|整形|修正|結果|完了).*[」〞』】]$/,
+  ];
+  return patterns.some(p => p.test(s));
+}
+
 // 保存セッション型定義
 interface SavedSession {
   id: string;
@@ -248,7 +319,7 @@ export default function Home() {
           setProgress({ step: `✅ 完了！`, percent: 100 });
           const completedResult = {
             segments: statusData.result?.segments || [],
-            refinedText: statusData.result?.refinedText || null,
+            refinedText: stripThinking(statusData.result?.refinedText),
             summary: statusData.result?.summary || null,
           };
           setResult(completedResult);
@@ -394,7 +465,7 @@ export default function Home() {
     if (!target) return;
     setResult({
       segments: target.segments,
-      refinedText: target.refinedText,
+      refinedText: stripThinking(target.refinedText),
       summary: target.summary,
     });
     setSpeakerNames(target.speakerNames || {});
@@ -743,7 +814,7 @@ export default function Home() {
           
           const completedResult = {
             segments: statusData.result?.segments || [],
-            refinedText: statusData.result?.refinedText || null,
+            refinedText: stripThinking(statusData.result?.refinedText),
             summary: statusData.result?.summary || null,
           };
           console.log('[DEBUG] completedResult refinedText:', completedResult.refinedText ? 'YES (' + completedResult.refinedText.length + ' chars)' : 'NULL');
@@ -858,11 +929,11 @@ export default function Home() {
       if (data.jobId) {
         const jobResult = await pollJob(data.jobId, BACKEND);
         if (jobResult.refinedText) {
-          setResult((prev: any) => ({ ...prev, refinedText: jobResult.refinedText }));
+          setResult((prev: any) => ({ ...prev, refinedText: stripThinking(jobResult.refinedText) }));
         }
       // Legacy sync mode: direct result
       } else if (data.refinedText) {
-        setResult((prev: any) => ({ ...prev, refinedText: data.refinedText }));
+        setResult((prev: any) => ({ ...prev, refinedText: stripThinking(data.refinedText) }));
       } else if (data.error) {
         throw new Error(data.error);
       }
