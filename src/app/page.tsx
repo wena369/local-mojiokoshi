@@ -1671,10 +1671,105 @@ export default function Home() {
             return;
           }
         }
-        console.warn("[Summarize] Cloud Gemini summarize failed, falling back to backend server...");
+        console.warn("[Summarize] Vercel API summarize failed or timed out. Falling back to direct browser Gemini API call...");
+
+        // 1.5. ブラウザから直接 Google Gemini API を実行（サーバーレス関数のタイムアウトを完全回避）
+        try {
+          const rawSpeakers = Array.from(new Set(
+            result.segments
+              .map((s: any) => s.speaker || "SPEAKER_00")
+              .filter((sp: string) => sp !== "SILENCE" && !sp.startsWith("SILENCE"))
+          )).sort() as string[];
+
+          const participants = rawSpeakers.map((spId: string) => {
+            const name = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
+            const role = speakerRoles[spId] ? `（${speakerRoles[spId]}）` : "";
+            return { spId, name, fullName: `${name}${role}` };
+          });
+
+          const participantListStr = participants.length > 0
+            ? participants.map((p, i) => `${i + 1}. 【${p.fullName}】`).join("\n")
+            : "・参加者";
+
+          const transcriptLines = result.segments.map((s: any) => {
+            const spId = s.speaker || "SPEAKER_00";
+            const name = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
+            return `[${name}] ${s.text || ""}`;
+          });
+          const fullTranscript = transcriptLines.join("\n");
+
+          const numWorks = paintingCount > 0 ? Math.max(paintingCount, 2) : 2;
+          const makeWorkTemplate = (wIdx: number) => {
+            return participants.map(p => 
+              `- #### 【${p.name}】の第${wIdx}枚目に対する発言・着眼点・解釈:\n  （※絶対に省略禁止。第${wIdx}枚目の絵画について ${p.name} が述べた感想、気づき、色彩や構図への指摘、独自の解釈、短い第一印象や相槌・同意まで、その人が語った内容を必ず具体的に文章化して記録すること）`
+            ).join("\n\n");
+          };
+
+          const worksSections = Array.from({ length: numWorks }, (_, i) => {
+            const wNum = i + 1;
+            return (
+              `### 【第${wNum}枚目の作品（絵画）の鑑賞記録と参加者全員の発言】\n` +
+              `・作品のモチーフと描かれている情景: （第${wNum}枚目の絵画には具体的に何が描かれているか、色調や構図の特徴を明記）\n` +
+              `・全体の対話の流れと議論の展開: （この作品を通してどのような議論が発展したかを詳細に記述）\n` +
+              `・【第${wNum}枚目に対する参加者全員の鑑賞発言（★全 ${participants.length} 名分を必ず1人ずつ漏れなく記載）】:\n` +
+              `※以下に記載された全参加者（全 ${participants.length} 名）それぞれの見出しを1つも削らず、全員分の発言・感想を記述してください：\n\n` +
+              makeWorkTemplate(wNum)
+            );
+          }).join("\n\n---\n\n");
+
+          const clientPrompt = mode === "yurupaka" ? (
+            "あなたは絵画鑑賞会（対話型アート鑑賞）の対話記録から、極めて詳細で充実した要約・鑑賞記録を作成する専門家AIです。\n" +
+            "以下の【鑑賞会の全対話テキスト】を最初から最後まで深く読み込み、一切省略することなく、長文で充実した鑑賞記録を作成してください。\n\n" +
+            `【参加者全員リスト（全 ${participants.length} 名）】\n` +
+            participantListStr + "\n\n" +
+            "【★最重要・絶対厳守の境界判定ルール（第1枚目と第2枚目の区分の徹底）】\n" +
+            "1. 【発言者指名による誤切替の禁止】: ファシリテーターが「では次、○○さんどうぞ」「次の方いかがですか」「じゃあ次は○○さん」と発言者を交代している発言は、作品の切り替えではありません！その指名された参加者の発言は【すべて第1枚目の発言】です。\n" +
+            "2. 【終了前の深掘り発言】: ファシリテーターが「そろそろ次に…」「次の絵に行こうと思いますが」と言った後に参加者が語った意見や、第1枚目の終盤でじっくり語られた長文の深い意見も、【すべて第1枚目の作品に対する発言】です。決して2枚目と混同したり、要約から除外してはなりません！\n" +
+            "3. 【第2枚目の開始地点】: ファシリテーターが実際に画面を切り替え、「2枚目の絵です」「次の作品を見てみましょう」と新しい絵を提示し、参加者がその新しい絵について語り始めた瞬間からが第2枚目です。\n\n" +
+            `【最重要・絶対厳守ルール：すべての作品（第1枚目も、第2枚目も）で参加者全員（全 ${participants.length} 名）の見出しを出力すること】\n` +
+            "1. 上記リストの全参加者（全 " + participants.length + " 名）について、第1枚目にも第2枚目にも、必ず1人1つ見出しを設けて発言を記録してください。\n" +
+            "2. 長文でしっかり意見を述べた参加者の発言はもちろん、短い第一印象や相槌・同意にとどまった参加者まで、全員の発言・着眼点を1人残らず拾い上げてください。\n" +
+            "3. 「第2枚目は全員出ているのに、第1枚目は一部の人しか出ていない」という状態は絶対に許されません。1枚目の対話テキストを最初から丁寧に精査し、全参加者の発言を必ず1枚目の欄に記録してください。\n\n" +
+            "【構成】\n" +
+            "### 【全体概要】\nこの鑑賞会セッション全体の目的、雰囲気、全体の対話の流れ、全体を通して深まった共通テーマを詳細に記述。\n\n" +
+            "---\n\n" +
+            worksSections + "\n\n" +
+            "---\n\n" +
+            "### 【感性と対話の深まりの分析】\n参加者の発言から見られた感性的な広がり（観察力、連想力、共感力、多角的な視点など）や対話の深まりを詳細に分析。\n\n" +
+            "※前置きや思考プロセスは出力せず、マークダウン本文のみを出力してください。\n\n" +
+            "【鑑賞会の全対話テキスト】\n" + fullTranscript
+          ) : (
+            "あなたは会議録作成のエキスパートAIです。全参加者の発言を漏らさず包括的会議録を作成してください。\n\n" +
+            `【参加者リスト】\n${participantListStr}\n\n` +
+            "【対話テキスト】\n" + fullTranscript
+          );
+
+          const directRes = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey.trim()}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: clientPrompt }] }],
+                generationConfig: { temperature: 0.15, maxOutputTokens: 8192 },
+              }),
+            }
+          );
+
+          if (directRes.ok) {
+            const directData = await directRes.json();
+            const directSummary = directData.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (directSummary && directSummary.trim()) {
+              setResult((prev: any) => ({ ...prev, summary: directSummary.trim() }));
+              return;
+            }
+          }
+        } catch (directErr) {
+          console.warn("[Summarize] Direct browser Gemini call failed:", directErr);
+        }
       }
 
-      // 2. ローカル/GPUバックエンドサーバーによる要約（フォールバック）
+      // 2. ローカル/GPUバックエンドサーバーによる要約（最終フォールバック）
       const BACKEND = selectedServer.backendUrl || process.env.NEXT_PUBLIC_BACKEND_URL || "/api";
       const response = await fetch(`${BACKEND}/summarize`, {
         method: "POST",
@@ -1689,7 +1784,7 @@ export default function Home() {
           api_key: geminiApiKey,
         }),
       });
-      if (!response.ok) throw new Error(`サーバーエラー (${response.status})`);
+      if (!response.ok) throw new Error(`要約サーバーエラー (${response.status})`);
       const data = await response.json();
       // Async mode
       if (data.jobId) {
