@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(req: NextRequest) {
-  const API_URL = "http://100.116.134.46:8000/transcribe";
+  const BACKEND_URL = process.env.BACKEND_URL || "http://100.116.134.46:8000";
+  const API_URL = `${BACKEND_URL}/transcribe`;
 
   try {
     const formData = await req.formData();

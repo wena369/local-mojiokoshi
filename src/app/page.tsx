@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useState, useRef, useMemo, useEffect, useCallback } from "react";
-import { useSession } from "next-auth/react";
-import { UploadCloud, FileAudio, CheckCircle2, Settings, Loader2, PlayCircle, FileText, Sparkles, Volume2, Copy, Download, Clock, AlertCircle, Users, BookOpen, Mail, Send, Server, Wifi, WifiOff, Save, FolderOpen, Trash2, CopyPlus, ChevronDown, Pencil } from "lucide-react";
+import { useSession, signIn, signOut } from "next-auth/react";
+import { UploadCloud, FileAudio, CheckCircle2, Settings, Loader2, PlayCircle, FileText, Sparkles, Volume2, Copy, Download, Clock, AlertCircle, Users, BookOpen, Mail, Send, Server, Wifi, WifiOff, Save, FolderOpen, Trash2, CopyPlus, ChevronDown, Pencil, Plus, X } from "lucide-react";
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -10,11 +10,27 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+export interface CustomWord {
+  id: string;
+  term: string;       // 表示名（例: 観自在力, ChatGPT）
+  reading: string;    // 読み（例: かんじざいりょく, ちゃっとじーぴーてぃー）
+  category?: string;  // カテゴリ（任意）
+  enabled: boolean;   // ON/OFF
+}
+
 const LS_SPEAKER_NAMES_KEY = 'ai-transcriber-speaker-names';
 const LS_EMAIL_KEY = 'ai-transcriber-forward-email';
 const LS_JOB_KEY = 'ai-transcriber-pending-job';
 const LS_SERVER_KEY = 'ai-transcriber-backend-server';
 const LS_SESSIONS_KEY = 'ai-transcriber-sessions';
+const LS_STT_ENGINE_KEY = 'ai-transcriber-stt-engine';
+const LS_GEMINI_KEY_KEY = 'ai-transcriber-gemini-key';
+const LS_GEMINI_MODEL_KEY = 'ai-transcriber-gemini-model';
+const LS_DEEPGRAM_KEY_KEY = 'ai-transcriber-deepgram-key';
+const LS_SCRIBE_KEY_KEY = 'ai-transcriber-scribe-key';
+const LS_PRE_REG_SPEAKERS_KEY = 'ai-transcriber-pre-registered-speakers';
+const LS_USE_PRE_REG_KEY = 'ai-transcriber-use-pre-registration';
+const LS_CUSTOM_WORDS_KEY = 'ai-transcriber-custom-words-v2';
 
 // LLM推論痕跡をフロントエンドで除去
 function stripThinking(text: string | null | undefined): string | null {
@@ -87,6 +103,154 @@ function isMetaLine(s: string): boolean {
   return patterns.some(p => p.test(s));
 }
 
+function clientHiraToKata(text: string): string {
+  return text.replace(/[\u3041-\u3096]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 0x60));
+}
+
+export function applyClientCustomWords(text: string, words: CustomWord[]): string {
+  if (!text || !words || words.length === 0) return text;
+  let res = text;
+  const activeWords = words.filter(w => w.enabled && w.term.trim());
+  const sorted = [...activeWords].sort((a, b) => Math.max(b.term.length, (b.reading || '').length) - Math.max(a.term.length, (a.reading || '').length));
+
+  for (const w of sorted) {
+    const term = w.term.trim();
+    const reading = (w.reading || '').trim();
+    if (!term) continue;
+
+    // 1. 読み（ひらがな・カタカナ）の置換
+    if (reading) {
+      const escapedHira = reading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      res = res.replace(new RegExp(escapedHira, 'gi'), term);
+      const kata = clientHiraToKata(reading);
+      if (kata !== reading) {
+        const escapedKata = kata.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        res = res.replace(new RegExp(escapedKata, 'gi'), term);
+      }
+    }
+
+    // 2. 単語そのものの表記ゆれ・スペースゆれの置換
+    if (/[a-zA-Z0-9]/.test(term)) {
+      const chars = term.split('').filter(c => c.trim());
+      if (chars.length >= 2) {
+        const pattern = chars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s*');
+        res = res.replace(new RegExp(pattern, 'gi'), term);
+      }
+    }
+  }
+  return res;
+}
+
+// 同一話者の連続セグメントを自然な文節・発話長に整える関数（細切れ＆大雑把すぎの両方を解消！）
+function mergeSameSpeakerBlocks(segments: any[]): any[] {
+  if (!Array.isArray(segments) || segments.length === 0) return segments;
+  const merged: any[] = [];
+  for (const s of segments) {
+    if (!s || !s.text || !s.text.trim()) continue;
+    const text = s.text.trim();
+    if (merged.length > 0 && merged[merged.length - 1].speaker === s.speaker) {
+      const prev = merged[merged.length - 1];
+      // 直前の文が短く（40文字未満）、かつ文末がまだ短い場合は自然に結合
+      if (prev.text.length < 40) {
+        prev.text = `${prev.text} ${text}`.trim();
+        prev.end = s.end > 0 ? s.end : prev.end;
+        continue;
+      }
+    }
+    merged.push({
+      speaker: s.speaker,
+      text: text,
+      start: typeof s.start === 'number' ? s.start : parseFloat(s.start) || 0,
+      end: typeof s.end === 'number' ? s.end : parseFloat(s.end) || 0,
+    });
+  }
+  return merged;
+}
+
+// セグメント配列に一意のIDを確実に付与・保証する関数
+function ensureSegmentIds(segments: any[]): any[] {
+  if (!Array.isArray(segments) || segments.length === 0) return [];
+  return segments.map((s, idx) => {
+    if (!s) return null;
+    return {
+      ...s,
+      id: s.id || `seg_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 8)}`,
+    };
+  }).filter(Boolean);
+}
+
+// JSON 配列文字列がセグメントテキスト内に入ってしまっている場合に、完全に解凍・展開する関数
+function unpackSegments(segments: any[]): any[] {
+  if (!Array.isArray(segments) || segments.length === 0) return segments;
+
+  const result: any[] = [];
+  for (const s of segments) {
+    if (!s) continue;
+    const text = typeof s.text === 'string' ? s.text.trim() : '';
+
+    // text が JSON 配列（例: [ {"speaker": "SPEAKER_00", ...} ]）の形状をしているかチェック
+    if (text.startsWith('[') && text.includes('"speaker"')) {
+      let unpacked: any[] | null = null;
+      try {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          unpacked = parsed;
+        }
+      } catch {
+        // 構文エラーの自動修復
+        try {
+          const healed = text
+            .replace(/,\s*"([0-9.]+)\s*,\s*"end"/g, ', "start": $1, "end"')
+            .replace(/,\s*([\]\}])/g, '$1');
+          const parsed = JSON.parse(healed);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            unpacked = parsed;
+          }
+        } catch {
+          // 正規表現によるオブジェクト単位の抽出
+          try {
+            const matches: any[] = Array.from(text.matchAll(/\{\s*"speaker"\s*:\s*"([^"]+)"\s*,\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"(?:[^\d}]*([0-9.]+))?(?:[^\d}]*([0-9.]+))?[^\}]*\}/gs));
+            const extracted: any[] = [];
+            for (const m of matches) {
+              const sp = m[1];
+              const txt = m[2];
+              const st = m[3] ? parseFloat(m[3]) : 0;
+              const en = m[4] ? parseFloat(m[4]) : 0;
+              if (txt && txt.trim()) {
+                extracted.push({ speaker: sp, text: txt.trim(), start: st, end: en });
+              }
+            }
+            if (extracted.length > 0) {
+              unpacked = extracted;
+            }
+          } catch {}
+        }
+      }
+
+      if (unpacked && unpacked.length > 0) {
+        for (const item of unpacked) {
+          let sp = String(item.speaker || s.speaker || 'SPEAKER_00').trim();
+          if (!sp.startsWith('SPEAKER_')) {
+            if (/^\d+$/.test(sp)) sp = `SPEAKER_${String(parseInt(sp, 10)).padStart(2, '0')}`;
+            else sp = `SPEAKER_${sp}`;
+          }
+          result.push({
+            id: item.id || `seg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+            speaker: sp,
+            text: String(item.text || '').trim(),
+            start: typeof item.start === 'number' ? item.start : parseFloat(item.start) || 0,
+            end: typeof item.end === 'number' ? item.end : parseFloat(item.end) || 0,
+          });
+        }
+        continue;
+      }
+    }
+
+    result.push(s);
+  }
+  return ensureSegmentIds(mergeSameSpeakerBlocks(result));
+}
+
 // 保存セッション型定義
 interface SavedSession {
   id: string;
@@ -122,7 +286,8 @@ function saveSessions(sessions: SavedSession[]) {
 interface BackendServer {
   id: string;
   name: string;
-  backendUrl: string;  // FastAPI の Tailscale Funnel URL
+  backendUrl: string;  // FastAPI の URL (Tailscale Funnel / Localhost)
+  fallbackUrls?: string[]; // 接続できない場合の代替URL
   gpu: string;
   llmModel: string;
   description: string;
@@ -133,19 +298,30 @@ interface BackendServer {
 const BACKEND_SERVERS: BackendServer[] = [
   {
     id: 'egpu-pc',
-    name: 'eGPU',
+    name: 'eGPU (TITAN RTX)',
     backendUrl: 'https://nucboxm7.goat-aldebaran.ts.net',
-    gpu: 'TITAN RTX',
-    llmModel: 'Gemma 4 e4b',
-    description: 'WhisperX + Gemma 4',
+    fallbackUrls: ['http://100.116.134.46:8000'],
+    gpu: 'NVIDIA TITAN RTX (24GB)',
+    llmModel: 'google/gemma-4-12b-qat',
+    description: 'NUCBOX M7 / WhisperX + Gemma 4',
   },
   {
     id: 'remote-pc',
-    name: 'eGPU2（予備）',
-    backendUrl: 'https://nucbox-m8.goat-aldebaran.ts.net',
-    gpu: 'RTX2080 Ti',
-    llmModel: 'Gemma 4 e4b',
-    description: 'WhisperX + Gemma 4',
+    name: 'eGPU2 (M7 Ultra)',
+    backendUrl: 'https://nucbox-m7-ultra-1.goat-aldebaran.ts.net',
+    fallbackUrls: ['http://100.75.146.1:8000', 'http://100.75.146.1:1234'],
+    gpu: 'NVIDIA RTX 2080 Ti (22GB)',
+    llmModel: 'google/gemma-4-12b-qat',
+    description: 'NUCBOX M7 Ultra / WhisperX + Gemma 4',
+  },
+  {
+    id: 'local-pc',
+    name: 'このPC (Ryzen AI Max)',
+    backendUrl: 'http://localhost:8000',
+    fallbackUrls: ['http://127.0.0.1:8000', 'https://tuf-a14.goat-aldebaran.ts.net', 'http://100.76.8.79:8000'],
+    gpu: 'AMD Radeon 8060S / 8050S',
+    llmModel: 'LM Studio / Local',
+    description: 'TUF-A14 (Ryzen AI Max 8060S 内蔵グラフィック)',
   },
 ];
 
@@ -203,6 +379,8 @@ export default function Home() {
   const { data: session } = useSession();
   const [file, setFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [mode, setMode] = useState<"yurupaka" | "general">("yurupaka");
+  const [paintingCount, setPaintingCount] = useState<number>(2);
   
   const [isProcessing, setIsProcessing] = useState(false);
   const [isRefining, setIsRefining] = useState(false);
@@ -228,50 +406,312 @@ export default function Home() {
   const [selectedServerId, setSelectedServerId] = useState<string>('egpu-pc');
   const [checkingServers, setCheckingServers] = useState(false);
   const [extraSpeakers, setExtraSpeakers] = useState<string[]>([]);  // 手動追加された話者
+  const [jobFileName, setJobFileName] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // 音声認識エンジン & APIキー設定 State
+  const [sttEngine, setSttEngine] = useState<"whisper" | "gemini" | "deepgram" | "scribe">(() => {
+    try {
+      return (localStorage.getItem(LS_STT_ENGINE_KEY) as any) || "whisper";
+    } catch {
+      return "whisper";
+    }
+  });
+  const [geminiApiKey, setGeminiApiKey] = useState<string>(() => {
+    try {
+      return localStorage.getItem(LS_GEMINI_KEY_KEY) || "";
+    } catch {
+      return "";
+    }
+  });
+  const [geminiModel, setGeminiModel] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(LS_GEMINI_MODEL_KEY);
+      if (saved && !saved.includes("gemini-3.") && !saved.includes("transcribe")) return saved;
+      return "gemini-2.0-flash";
+    } catch {
+      return "gemini-2.0-flash";
+    }
+  });
+  const [deepgramApiKey, setDeepgramApiKey] = useState<string>(() => {
+    try {
+      return localStorage.getItem(LS_DEEPGRAM_KEY_KEY) || "";
+    } catch {
+      return "";
+    }
+  });
+  const [scribeApiKey, setScribeApiKey] = useState<string>(() => {
+    try {
+      return localStorage.getItem(LS_SCRIBE_KEY_KEY) || "";
+    } catch {
+      return "";
+    }
+  });
+  const [showEngineModal, setShowEngineModal] = useState<boolean>(false);
+
+  // 事前話者登録 State & 型定義
+  const [usePreRegistration, setUsePreRegistration] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem(LS_USE_PRE_REG_KEY);
+      return saved === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [preRegisteredSpeakers, setPreRegisteredSpeakers] = useState<{ id: string; name: string; reading: string; role: string }[]>(() => {
+    try {
+      const saved = localStorage.getItem(LS_PRE_REG_SPEAKERS_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return [{ id: 'pre_1', name: '', reading: '', role: '参加者' }];
+  });
+
+  // 事前登録設定の自動保存
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_PRE_REG_SPEAKERS_KEY, JSON.stringify(preRegisteredSpeakers));
+    } catch {}
+  }, [preRegisteredSpeakers]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_USE_PRE_REG_KEY, String(usePreRegistration));
+    } catch {}
+  }, [usePreRegistration]);
+
+  const [speakerCountHint, setSpeakerCountHint] = useState<string>("auto");
+  const [isRefiningSpeakers, setIsRefiningSpeakers] = useState<boolean>(false);
+
+  const handleRefineSpeakers = async () => {
+    if (!result || !result.segments || result.segments.length === 0) return;
+    if (!geminiApiKey.trim()) {
+      alert("AI話者再分離には Gemini API Key が必要です。設定から入力してください。");
+      return;
+    }
+    setIsRefiningSpeakers(true);
+    try {
+      const res = await fetch("/api/refine-speakers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          segments: result.segments,
+          apiKey: geminiApiKey.trim(),
+          speakerCount: speakerCountHint !== "auto" ? speakerCountHint : undefined,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || "再分離に失敗しました");
+      }
+      const data = await res.json();
+      if (data.segments && data.segments.length > 0) {
+        setResult({
+          ...result,
+          segments: ensureSegmentIds(unpackSegments(data.segments)),
+        });
+        alert("✨ 会話構造から話者を高精度に再分離しました！");
+      }
+    } catch (e: any) {
+      alert(`話者再分離エラー: ${e.message}`);
+    } finally {
+      setIsRefiningSpeakers(false);
+    }
+  };
+
+  const addPreRegisteredSpeaker = useCallback(() => {
+    setPreRegisteredSpeakers(prev => [
+      ...prev,
+      { id: `pre_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`, name: '', reading: '', role: '参加者' }
+    ]);
+  }, []);
+
+  const removePreRegisteredSpeaker = useCallback((id: string) => {
+    setPreRegisteredSpeakers(prev => prev.length > 1 ? prev.filter(s => s.id !== id) : prev);
+  }, []);
+
+  const updatePreRegisteredSpeaker = useCallback((id: string, field: 'name' | 'reading' | 'role', value: string) => {
+    setPreRegisteredSpeakers(prev => prev.map(s => {
+      if (s.id === id) {
+        return { ...s, [field]: value };
+      }
+      return s;
+    }));
+  }, []);
+
+  // 📚 カスタム辞書・専門用語 State
+  const [customWords, setCustomWords] = useState<CustomWord[]>(() => {
+    try {
+      const saved = localStorage.getItem(LS_CUSTOM_WORDS_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return [
+      { id: 'cw_init_1', term: '観自在力', reading: 'かんじざいりょく', category: '専門用語', enabled: true },
+      { id: 'cw_init_2', term: 'ゆるパカ', reading: 'ゆるぱか', category: 'サービス・作品名', enabled: true },
+      { id: 'cw_init_3', term: 'エルリントン', reading: 'えるりんとん', category: '人名・組織', enabled: true },
+    ];
+  });
+
+  const [newWordTerm, setNewWordTerm] = useState("");
+  const [newWordReading, setNewWordReading] = useState("");
+  const [newWordCategory, setNewWordCategory] = useState("専門用語");
+  const [showAddWordForm, setShowAddWordForm] = useState(false);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_CUSTOM_WORDS_KEY, JSON.stringify(customWords));
+    } catch {}
+  }, [customWords]);
+
+  const toggleCustomWord = useCallback((id: string) => {
+    setCustomWords(prev => prev.map(w => w.id === id ? { ...w, enabled: !w.enabled } : w));
+  }, []);
+
+  const setAllCustomWords = useCallback((enabled: boolean) => {
+    setCustomWords(prev => prev.map(w => ({ ...w, enabled })));
+  }, []);
+
+  const addCustomWord = useCallback(() => {
+    if (!newWordTerm.trim()) return;
+    const newWord: CustomWord = {
+      id: `cw_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      term: newWordTerm.trim(),
+      reading: newWordReading.trim(),
+      category: newWordCategory.trim() || '専門用語',
+      enabled: true,
+    };
+    setCustomWords(prev => [newWord, ...prev]);
+    setNewWordTerm("");
+    setNewWordReading("");
+    setShowAddWordForm(false);
+  }, [newWordTerm, newWordReading, newWordCategory]);
+
+  const removeCustomWord = useCallback((id: string) => {
+    setCustomWords(prev => prev.filter(w => w.id !== id));
+  }, []);
+
+  // 辞書ルールを現在の結果（セグメント・推敲テキスト）に即時適用
+  const applyDictionaryToCurrentResult = useCallback(() => {
+    if (!result || !result.segments) return;
+    setResult((prev: any) => {
+      if (!prev || !prev.segments) return prev;
+      const updatedSegments = prev.segments.map((s: any) => ({
+        ...s,
+        text: applyClientCustomWords(s.text || '', customWords),
+      }));
+      const updatedRefined = prev.refinedText ? applyClientCustomWords(prev.refinedText, customWords) : prev.refinedText;
+      return {
+        ...prev,
+        segments: updatedSegments,
+        refinedText: updatedRefined,
+      };
+    });
+    setCopied("辞書ルールを反映しました");
+    setTimeout(() => setCopied(null), 3000);
+  }, [result, customWords]);
 
   // 選択中のバックエンドサーバー情報を取得
   const selectedServer = useMemo(() => {
     return backendServers.find(s => s.id === selectedServerId) || backendServers[0];
   }, [backendServers, selectedServerId]);
 
-  // 各バックエンドのヘルスチェック（ブラウザから直接）
+  // 各バックエンドのヘルスチェック（Tailscale内のブラウザから直接確認優先）
   const checkBackendServers = useCallback(async () => {
     setCheckingServers(true);
-    const updated = await Promise.all(
-      BACKEND_SERVERS.map(async (server) => {
-        if (!server.backendUrl) return { ...server, online: false, gpuInfo: '未設定' };
-        try {
-          const res = await fetch(`${server.backendUrl}/`, {
-            signal: AbortSignal.timeout(10000),
-            mode: 'cors',
-          });
-          if (res.ok) {
-            const data = await res.json();
-            return {
-              ...server,
-              online: true,
-              gpuInfo: server.gpu,
-            };
+    try {
+      const results = await Promise.all(
+        BACKEND_SERVERS.map(async (server) => {
+          const testUrls = [server.backendUrl, ...(server.fallbackUrls || [])].filter(Boolean);
+          if (testUrls.length === 0) return { ...server, online: false, gpuInfo: '未設定' };
+
+          // 1. ブラウザから直接 fetch (CORS) でポート8000等のバックエンド確認
+          for (const testUrl of testUrls) {
+            if (testUrl.includes(':1234')) continue;
+            try {
+              const res = await fetch(`${testUrl}/`, {
+                signal: AbortSignal.timeout(3000),
+                mode: 'cors',
+              });
+              if (res.ok) {
+                const data = await res.json();
+                return {
+                  ...server,
+                  backendUrl: testUrl, // 疎通したURLを採用
+                  online: true,
+                  gpuInfo: data.gpu && data.gpu !== 'N/A' ? data.gpu : server.gpu,
+                  llmModel: data.llm_model && data.llm_model !== 'N/A' ? data.llm_model : server.llmModel,
+                };
+              }
+            } catch {}
           }
-          return { ...server, online: false, gpuInfo: server.gpu };
-        } catch {
-          // CORS error still means server is reachable - try no-cors ping
+
+          // 2. /api/health サーバーレスプロキシ経由（Tailscale / Funnel経由で確認）
           try {
-            const ping = await fetch(`${server.backendUrl}/`, {
+            const proxyRes = await fetch(`/api/health?server=${server.id}`, {
+              cache: 'no-store',
               signal: AbortSignal.timeout(5000),
-              mode: 'no-cors',
             });
-            // no-cors returns opaque response (status 0) but means server is up
-            return { ...server, online: true, gpuInfo: server.gpu };
-          } catch {
-            return { ...server, online: false, gpuInfo: server.gpu };
+            if (proxyRes.ok) {
+              const data = await proxyRes.json();
+              if (data.online) {
+                return {
+                  ...server,
+                  backendUrl: data.activeUrl || server.backendUrl,
+                  online: true,
+                  gpuInfo: data.gpu && data.gpu !== 'N/A' ? data.gpu : server.gpu,
+                  llmModel: data.llm_model && data.llm_model !== 'N/A' ? data.llm_model : server.llmModel,
+                };
+              }
+            }
+          } catch {}
+
+          // 3. LM Studio (ポート1234) がブラウザから直接見えるかチェック（eGPU2等）
+          if (server.id === 'remote-pc') {
+            try {
+              const lmRes = await fetch('http://100.75.146.1:1234/v1/models', { signal: AbortSignal.timeout(2500) });
+              if (lmRes.ok) {
+                const lmData = await lmRes.json();
+                const chatModel = lmData.data?.find((m: any) => !m.id?.includes('embed'))?.id || lmData.data?.[0]?.id;
+                return {
+                  ...server,
+                  online: true,
+                  gpuInfo: 'NVIDIA RTX 2080 Ti (22GB)',
+                  llmModel: chatModel || server.llmModel,
+                };
+              }
+            } catch {}
           }
-        }
-      })
-    );
-    setBackendServers(updated);
-    setCheckingServers(false);
+
+          if (server.id === 'local-pc') {
+            try {
+              const lmRes = await fetch('http://127.0.0.1:1234/v1/models', { signal: AbortSignal.timeout(2000) });
+              if (lmRes.ok) {
+                const lmData = await lmRes.json();
+                const chatModel = lmData.data?.find((m: any) => !m.id?.includes('embed'))?.id || lmData.data?.[0]?.id;
+                return {
+                  ...server,
+                  online: true,
+                  gpuInfo: 'AMD Radeon 8060S / 8050S',
+                  llmModel: chatModel || server.llmModel,
+                };
+              }
+            } catch {}
+          }
+
+          return { ...server, online: false, gpuInfo: server.gpu };
+        })
+      );
+      setBackendServers(results);
+    } catch (e) {
+      console.warn('Backend server check error:', e);
+    } finally {
+      setCheckingServers(false);
+    }
   }, []);
 
   // サーバー選択をlocalStorageに保存
@@ -311,6 +751,19 @@ export default function Home() {
           continue;
         }
         const statusData = await statusResponse.json();
+        
+        // 途中結果の反映
+        if (statusData.segments && statusData.segments.length > 0) {
+          setResult((prev: any) => ({
+            segments: statusData.segments,
+            refinedText: prev?.refinedText || null,
+            summary: prev?.summary || null,
+          }));
+        }
+        if (statusData.filename) {
+          setJobFileName(statusData.filename);
+        }
+
         const elapsed = Math.floor((Date.now() - startTime) / 1000);
         const elapsedStr = `${Math.floor(elapsed/60)}分${elapsed%60}秒`;
 
@@ -381,15 +834,30 @@ export default function Home() {
     }
   }, []);
 
-  // Load saved names, email, server selection, and pending job from localStorage on mount
+  // Load saved preferences on mount
   useEffect(() => {
     setSavedNamesList(loadSavedNames());
+    setSavedSessionsList(loadSessions());
     try {
+      const savedEngine = localStorage.getItem(LS_STT_ENGINE_KEY) as any;
+      if (savedEngine) setSttEngine(savedEngine);
+      const savedGeminiKey = localStorage.getItem(LS_GEMINI_KEY_KEY);
+      if (savedGeminiKey) setGeminiApiKey(savedGeminiKey);
+      const savedGeminiModel = localStorage.getItem(LS_GEMINI_MODEL_KEY);
+      if (savedGeminiModel) {
+        setGeminiModel(savedGeminiModel);
+      } else {
+        setGeminiModel("gemini-3.5-transcribe");
+        try { localStorage.setItem(LS_GEMINI_MODEL_KEY, "gemini-3.5-transcribe"); } catch {}
+      }
+      const savedDgKey = localStorage.getItem(LS_DEEPGRAM_KEY_KEY);
+      if (savedDgKey) setDeepgramApiKey(savedDgKey);
+      const savedScKey = localStorage.getItem(LS_SCRIBE_KEY_KEY);
+      if (savedScKey) setScribeApiKey(savedScKey);
+      
       const savedEmail = localStorage.getItem(LS_EMAIL_KEY);
       if (savedEmail) setForwardEmail(savedEmail);
-    } catch {}
-    // Load saved LM server selection
-    try {
+
       const savedServer = localStorage.getItem(LS_SERVER_KEY);
       if (savedServer) setSelectedServerId(savedServer);
     } catch {}
@@ -422,7 +890,7 @@ export default function Home() {
   const saveCurrentSession = useCallback(() => {
     if (!result?.segments || !isAdmin) return;
     const now = new Date().toISOString();
-    const fileName = file?.name || '不明なファイル';
+    const fileName = file?.name || jobFileName || '不明なファイル';
     const title = fileName.replace(/\.[^.]+$/, '');
 
     const sessionData: SavedSession = {
@@ -464,7 +932,7 @@ export default function Home() {
     const target = sessions.find(s => s.id === sessionId);
     if (!target) return;
     setResult({
-      segments: target.segments,
+      segments: ensureSegmentIds(target.segments),
       refinedText: stripThinking(target.refinedText),
       summary: target.summary,
     });
@@ -473,6 +941,7 @@ export default function Home() {
     setSpeakerRoles(target.speakerRoles || {});
     setCurrentSessionId(target.id);
     setFile(null);
+    setJobFileName(target.fileName || '不明なファイル');
     setErrorMsg(null);
     setShowSessionsPanel(false);
   }, []);
@@ -523,9 +992,9 @@ export default function Home() {
 
   // Detect unique speakers from results
   const uniqueSpeakers = useMemo(() => {
-    if (!result?.segments) return [];
+    if (!result?.segments || !Array.isArray(result.segments)) return [];
     const seen = new Set<string>();
-    result.segments.forEach((s: any) => { if (s.speaker) seen.add(s.speaker); });
+    result.segments.forEach((s: any) => { if (s?.speaker) seen.add(s.speaker); });
     return Array.from(seen).sort();
   }, [result]);
 
@@ -563,40 +1032,52 @@ export default function Home() {
     setSpeakerRoles(prev => { const n = { ...prev }; delete n[speakerId]; return n; });
   }, [uniqueSpeakers]);
 
-  // ---- セグメント編集操作 ----
-  const updateSegmentText = useCallback((idx: number, newText: string) => {
+  // ---- セグメント編集操作（IDまたはインデックスで安全に対象を特定） ----
+  const updateSegmentText = useCallback((target: string | number, newText: string) => {
     setResult((prev: any) => {
-      if (!prev?.segments) return prev;
-      const updated = [...prev.segments];
-      updated[idx] = { ...updated[idx], text: newText };
+      if (!prev?.segments || !Array.isArray(prev.segments)) return prev;
+      const updated = prev.segments.map((s: any, i: number) => {
+        const matches = typeof target === 'string' ? s.id === target : i === target;
+        return matches ? { ...s, text: newText } : s;
+      });
       return { ...prev, segments: updated };
     });
   }, []);
 
-  const updateSegmentSpeaker = useCallback((idx: number, newSpeaker: string) => {
+  const updateSegmentSpeaker = useCallback((target: string | number, newSpeaker: string) => {
     setResult((prev: any) => {
-      if (!prev?.segments) return prev;
-      const updated = [...prev.segments];
-      updated[idx] = { ...updated[idx], speaker: newSpeaker };
+      if (!prev?.segments || !Array.isArray(prev.segments)) return prev;
+      const updated = prev.segments.map((s: any, i: number) => {
+        const matches = typeof target === 'string' ? s.id === target : i === target;
+        return matches ? { ...s, speaker: newSpeaker } : s;
+      });
       return { ...prev, segments: updated };
     });
   }, []);
 
-  const duplicateSegment = useCallback((idx: number) => {
+  const duplicateSegment = useCallback((target: string | number) => {
     setResult((prev: any) => {
-      if (!prev?.segments) return prev;
+      if (!prev?.segments || !Array.isArray(prev.segments)) return prev;
+      const idx = typeof target === 'string'
+        ? prev.segments.findIndex((s: any) => s.id === target)
+        : target;
+      if (idx < 0 || idx >= prev.segments.length) return prev;
       const updated = [...prev.segments];
-      const clone = { ...updated[idx] };
+      const clone = {
+        ...updated[idx],
+        id: `seg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+      };
       updated.splice(idx + 1, 0, clone);
       return { ...prev, segments: updated };
     });
   }, []);
 
-  const deleteSegment = useCallback((idx: number) => {
+  const deleteSegment = useCallback((target: string | number) => {
     setResult((prev: any) => {
-      if (!prev?.segments || prev.segments.length <= 1) return prev;
-      const updated = [...prev.segments];
-      updated.splice(idx, 1);
+      if (!prev?.segments || !Array.isArray(prev.segments)) return prev;
+      const updated = prev.segments.filter((s: any, i: number) => {
+        return typeof target === 'string' ? s.id !== target : i !== target;
+      });
       return { ...prev, segments: updated };
     });
   }, []);
@@ -726,6 +1207,11 @@ export default function Home() {
     const isMobileFile = !selectedFile.type || selectedFile.type === 'application/octet-stream';
     if (isAudioVideo || isValidExt || isMobileFile) {
       setFile(selectedFile);
+      setJobFileName(selectedFile.name);
+      setResult(null);
+      setErrorMsg(null);
+      setProgress({ step: "", percent: 0 });
+      try { localStorage.removeItem(LS_JOB_KEY); } catch {}
     } else {
       alert(`選択されたファイルは対応していません。\nファイル名: ${selectedFile.name}\nタイプ: ${selectedFile.type || '不明'}\n\n対応形式: MP3, WAV, M4A, MP4, MOV, OGG, FLAC, AAC, WebM, AVI, MKV, CAFなど`);
     }
@@ -754,11 +1240,148 @@ export default function Home() {
   const handleSubmit = async () => {
     if (!file) return;
 
+    // APIキー必須チェック
+    if (sttEngine === "gemini" && !geminiApiKey.trim()) {
+      setErrorMsg("⚠️ Google Gemini を使用するには API キーが必要です。画面上の入力欄に Gemini API キーを入力するか、上の「Whisper（無料）」に切り替えてください。");
+      return;
+    }
+    if (sttEngine === "deepgram" && !deepgramApiKey.trim()) {
+      setErrorMsg("⚠️ Deepgram を使用するには API キーが必要です。");
+      return;
+    }
+    if (sttEngine === "scribe" && !scribeApiKey.trim()) {
+      setErrorMsg("⚠️ ElevenLabs Scribe を使用するには API キーが必要です。");
+      return;
+    }
+
     const controller = new AbortController();
     abortRef.current = controller;
     setIsProcessing(true);
     setErrorMsg(null);
     setResult(null);
+
+    // ---- Gemini サーバーサイド超高速モード（Vercel完結・PC起動不要！） ----
+    if (sttEngine === "gemini") {
+      const startTime = Date.now();
+      try {
+        setProgress({ step: "☁️ Google Cloud に音声をアップロード中...", percent: 20 });
+        
+        // 1. Google AI Studio File Upload API へ直接アップロード（Vercelの4.5MB制限を完全回避）
+        const mimeType = file.type || "audio/mp3";
+        const uploadRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiApiKey.trim()}`, {
+          method: "POST",
+          headers: {
+            "X-Goog-Upload-Command": "start, upload, finalize",
+            "X-Goog-Upload-Header-Content-Length": String(file.size),
+            "X-Goog-Upload-Header-Content-Type": mimeType,
+            "Content-Type": mimeType,
+          },
+          body: file,
+          signal: controller.signal,
+        });
+
+        if (!uploadRes.ok) {
+          const errBody = await uploadRes.text();
+          throw new Error(`Google Upload Failed (${uploadRes.status}): ${errBody}`);
+        }
+
+        const uploadData = await uploadRes.json();
+        const fileUri = uploadData.file?.uri;
+        const uploadedMime = uploadData.file?.mimeType || mimeType;
+
+        if (!fileUri) {
+          throw new Error("Google File Upload did not return a valid file URI");
+        }
+
+        setProgress({ step: "🚀 Gemini 2.0 Flash が超高速で文字起こし中...", percent: 50 });
+        
+        // 2. 取得した fileUri だけを Vercel サーバーレス API に送信
+        const geminiFormData = new FormData();
+        geminiFormData.append("file_uri", fileUri);
+        geminiFormData.append("mime_type", uploadedMime);
+        geminiFormData.append("api_key", geminiApiKey.trim());
+        geminiFormData.append("gemini_model", geminiModel);
+        
+        const preRegValid = usePreRegistration ? preRegisteredSpeakers.filter(s => s.name.trim()) : [];
+        geminiFormData.append("pre_registered_speakers_json", JSON.stringify(preRegValid));
+
+        const activeCustomWords = customWords.filter(w => w.enabled && w.term.trim());
+        geminiFormData.append("custom_dictionary_json", JSON.stringify(activeCustomWords));
+        geminiFormData.append("speaker_count_hint", speakerCountHint);
+
+        const res = await fetch("/api/transcribe-gemini", {
+          method: "POST",
+          body: geminiFormData,
+          signal: controller.signal,
+        });
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({ error: res.statusText }));
+          throw new Error(errData.error || `Gemini API error: ${res.status}`);
+        }
+
+        const data = await res.json();
+        const rawSegments = data.segments || [];
+        
+        // 万能パース＆辞書置換
+        const unpacked = ensureSegmentIds(unpackSegments(rawSegments));
+        const processedSegments = unpacked.map((s: any) => ({
+          ...s,
+          text: applyClientCustomWords(s.text || '', customWords),
+        }));
+
+        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+        const elapsedStr = `${Math.floor(elapsed/60)}分${elapsed%60}秒`;
+        setProgress({ step: `✅ 完了！（処理時間: ${elapsedStr}）`, percent: 100 });
+
+        const completedResult = {
+          segments: processedSegments,
+          refinedText: null,
+          summary: null,
+        };
+
+        setResult(completedResult);
+
+        // 事前登録話者およびサーバー判定話者名の完全マッピング
+        if (data.speakerNames && Object.keys(data.speakerNames).length > 0) {
+          setSpeakerNames(prev => ({ ...data.speakerNames, ...prev }));
+        }
+
+        if (usePreRegistration && preRegValid.length > 0 && completedResult.segments.length > 0) {
+          const seenSpeakers = Array.from(new Set(completedResult.segments.map((s: any) => s.speaker))).sort() as string[];
+          const newNames: Record<string, string> = {};
+          const newReadings: Record<string, string> = {};
+          const newRoles: Record<string, string> = {};
+          seenSpeakers.forEach((spId, idx) => {
+            // サーバー側で名前が設定されていればそれを活用、なければインデックス順にフォールバック
+            const serverName = data.speakerNames?.[spId];
+            const matchedPre = serverName ? preRegValid.find(p => p.name.trim() === serverName) : null;
+            if (matchedPre) {
+              newNames[spId] = matchedPre.name;
+              if (matchedPre.reading) newReadings[spId] = matchedPre.reading;
+              if (matchedPre.role) newRoles[spId] = matchedPre.role;
+            } else if (idx < preRegValid.length) {
+              newNames[spId] = preRegValid[idx].name;
+              if (preRegValid[idx].reading) newReadings[spId] = preRegValid[idx].reading;
+              if (preRegValid[idx].role) newRoles[spId] = preRegValid[idx].role;
+            }
+          });
+          setSpeakerNames(prev => ({ ...newNames, ...prev }));
+          setSpeakerReadings(prev => ({ ...newReadings, ...prev }));
+          setSpeakerRoles(prev => ({ ...newRoles, ...prev }));
+        }
+
+        return;
+      } catch (err: any) {
+        if (controller.signal.aborted) return;
+        console.error("Gemini Transcription Error:", err);
+        setErrorMsg(err.message || "Gemini 文字起こし中にエラーが発生しました");
+        return;
+      } finally {
+        setIsProcessing(false);
+      }
+    }
+
     setProgress({ step: `📤 ${selectedServer.name} にアップロード中...`, percent: 5 });
     
     // Use selected backend server URL
@@ -769,6 +1392,20 @@ export default function Home() {
     formData.append("diarization", "true");
     formData.append("refinement", "false");
     formData.append("summary", "false");
+    formData.append("mode", mode);
+    formData.append("painting_count", String(paintingCount));
+    formData.append("engine", sttEngine);
+    const currentApiKey = (sttEngine as string) === "gemini" ? (geminiApiKey || "") : sttEngine === "deepgram" ? deepgramApiKey : sttEngine === "scribe" ? scribeApiKey : "";
+    formData.append("api_key", currentApiKey);
+    formData.append("gemini_model", geminiModel);
+    
+    const preRegValid = usePreRegistration ? preRegisteredSpeakers.filter(s => s.name.trim()) : [];
+    const preRegStr = preRegValid.map(s => `${s.name}${s.reading ? `（${s.reading}）` : ''}${s.role ? ` [${s.role}]` : ''}`).join(', ');
+    formData.append("pre_registered_speakers", preRegStr);
+    formData.append("pre_registered_speakers_json", JSON.stringify(preRegValid));
+
+    const activeCustomWords = customWords.filter(w => w.enabled && w.term.trim());
+    formData.append("custom_dictionary_json", JSON.stringify(activeCustomWords));
 
     try {
       const response = await fetch(`${BASE_URL}/transcribe_async`, {
@@ -799,6 +1436,19 @@ export default function Home() {
         if (!statusResponse.ok) continue;
 
         const statusData = await statusResponse.json();
+        
+        // 途中結果の反映
+        if (statusData.segments && statusData.segments.length > 0) {
+          setResult((prev: any) => ({
+            segments: ensureSegmentIds(statusData.segments),
+            refinedText: prev?.refinedText || null,
+            summary: prev?.summary || null,
+          }));
+        }
+        if (statusData.filename) {
+          setJobFileName(statusData.filename);
+        }
+
         const elapsed = Math.floor((Date.now() - startTime) / 1000);
         const elapsedStr = `${Math.floor(elapsed/60)}分${elapsed%60}秒`;
         
@@ -812,9 +1462,36 @@ export default function Home() {
           console.log('[DEBUG] refinedText type:', typeof statusData.result?.refinedText, 'length:', statusData.result?.refinedText?.length);
           console.log('[DEBUG] summary type:', typeof statusData.result?.summary, 'length:', statusData.result?.summary?.length);
           
+          let rawSegments = statusData.result?.segments || [];
+          // 万が一 1つのセグメント内に JSON 配列の文字列がそのまま入っていた場合の自動展開リカバリー
+          if (rawSegments.length === 1 && rawSegments[0].text && rawSegments[0].text.trim().startsWith('[')) {
+            try {
+              const parsed = JSON.parse(rawSegments[0].text);
+              if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].speaker) {
+                rawSegments = parsed;
+              }
+            } catch {
+              try {
+                const healed = rawSegments[0].text.replace(/,\s*"([0-9.]+)\s*,\s*"end"/g, ', "start": $1, "end"').replace(/,\s*([\]\}])/g, '$1');
+                const parsed = JSON.parse(healed);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                  rawSegments = parsed;
+                }
+              } catch {}
+            }
+          }
+
+          const unpacked = unpackSegments(rawSegments);
+          const processedSegments = ensureSegmentIds(unpacked).map((s: any) => ({
+            ...s,
+            text: applyClientCustomWords(s.text || '', customWords),
+          }));
+          const rawRefined = statusData.result?.refinedText ? stripThinking(statusData.result.refinedText) : null;
+          const processedRefined = rawRefined ? applyClientCustomWords(rawRefined, customWords) : null;
+
           const completedResult = {
-            segments: statusData.result?.segments || [],
-            refinedText: stripThinking(statusData.result?.refinedText),
+            segments: processedSegments,
+            refinedText: processedRefined,
             summary: statusData.result?.summary || null,
           };
           console.log('[DEBUG] completedResult refinedText:', completedResult.refinedText ? 'YES (' + completedResult.refinedText.length + ' chars)' : 'NULL');
@@ -822,6 +1499,25 @@ export default function Home() {
           console.log('[DEBUG] forwardEmail:', forwardEmail);
           
           setResult(completedResult);
+          
+          // 事前登録話者の自動マッピング（SPEAKER_00, SPEAKER_01 ... へ割り当て）
+          if (usePreRegistration && preRegValid.length > 0 && completedResult.segments.length > 0) {
+            const seenSpeakers = Array.from(new Set(completedResult.segments.map((s: any) => s.speaker))).sort() as string[];
+            const newNames: Record<string, string> = {};
+            const newReadings: Record<string, string> = {};
+            const newRoles: Record<string, string> = {};
+            seenSpeakers.forEach((spId, idx) => {
+              if (idx < preRegValid.length) {
+                newNames[spId] = preRegValid[idx].name;
+                if (preRegValid[idx].reading) newReadings[spId] = preRegValid[idx].reading;
+                if (preRegValid[idx].role) newRoles[spId] = preRegValid[idx].role;
+              }
+            });
+            setSpeakerNames(prev => ({ ...newNames, ...prev }));
+            setSpeakerReadings(prev => ({ ...newReadings, ...prev }));
+            setSpeakerRoles(prev => ({ ...newRoles, ...prev }));
+          }
+
           // Clear saved job
           try { localStorage.removeItem(LS_JOB_KEY); } catch {}
 
@@ -945,12 +1641,40 @@ export default function Home() {
     }
   };
 
-  // Step 3: Summarize with speaker names (async polling)
+  // Step 3: Summarize with speaker names (Gemini API 優先 / async polling)
   const handleSummarize = async () => {
     if (!result?.segments || isSummarizing) return;
     setIsSummarizing(true);
     setErrorMsg(null);
     try {
+      // 1. Gemini API Key がある場合は、超大容量・高精度の Gemini 要約 API を最優先で使用
+      if (geminiApiKey) {
+        const res = await fetch("/api/summarize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            segments: result.segments,
+            speaker_names: speakerNames,
+            speaker_readings: speakerReadings,
+            speaker_roles: speakerRoles,
+            mode: mode,
+            painting_count: paintingCount,
+            api_key: geminiApiKey,
+            model: geminiModel,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.summary) {
+            setResult((prev: any) => ({ ...prev, summary: data.summary }));
+            return;
+          }
+        }
+        console.warn("[Summarize] Cloud Gemini summarize failed, falling back to backend server...");
+      }
+
+      // 2. ローカル/GPUバックエンドサーバーによる要約（フォールバック）
       const BACKEND = selectedServer.backendUrl || process.env.NEXT_PUBLIC_BACKEND_URL || "/api";
       const response = await fetch(`${BACKEND}/summarize`, {
         method: "POST",
@@ -960,6 +1684,9 @@ export default function Home() {
           speaker_names: speakerNames,
           speaker_readings: speakerReadings,
           speaker_roles: speakerRoles,
+          mode: mode,
+          painting_count: paintingCount,
+          api_key: geminiApiKey,
         }),
       });
       if (!response.ok) throw new Error(`サーバーエラー (${response.status})`);
@@ -992,6 +1719,26 @@ export default function Home() {
         <div className="absolute top-1/3 left-1/4 w-[300px] h-[300px] bg-gradient-to-br from-orange-400/5 to-transparent rounded-full blur-3xl" />
       </div>
       <div className="relative max-w-5xl mx-auto px-6 py-12">
+        {/* User Bar */}
+        <div className="flex flex-wrap items-center justify-between gap-3 bg-[#0e2a3d]/70 backdrop-blur-md border border-cyan-800/40 rounded-2xl px-4 py-2.5 mb-8">
+          <div className="flex items-center gap-2.5 text-xs text-slate-300">
+            <div className="w-2 h-2 rounded-full bg-emerald-400" />
+            <span className="font-medium text-slate-200">{session?.user?.email || 'ログイン中'}</span>
+            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-300 bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 rounded-full">
+              認証済み
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => signOut()}
+              className="text-xs px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors"
+            >
+              ログアウト
+            </button>
+          </div>
+        </div>
+
         {/* Header Section */}
         <header className="text-center mb-16 space-y-5">
           <div className="inline-flex items-center justify-center gap-3 mb-4">
@@ -1012,6 +1759,157 @@ export default function Home() {
           
           {/* Main Upload Column */}
           <div className="lg:col-span-8 space-y-6">
+            {/* 🎙️ 音声認識エンジンの切り替えタブ */}
+            <div className="bg-[#0e2a3d]/70 backdrop-blur-sm border border-cyan-800/40 rounded-3xl p-5 shadow-xl space-y-3.5">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-semibold text-cyan-200 flex items-center gap-2">
+                  <Volume2 className="w-4 h-4 text-teal-400" />
+                  音声認識（STT）エンジン
+                </label>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-[#0c1929] p-1.5 rounded-2xl">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSttEngine("whisper");
+                    try { localStorage.setItem(LS_STT_ENGINE_KEY, "whisper"); } catch {}
+                  }}
+                  className={`py-2 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center gap-0.5 ${
+                    sttEngine === 'whisper'
+                      ? 'bg-teal-500/20 text-teal-200 border border-teal-400/40 shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200 border border-transparent'
+                  }`}
+                >
+                  <span>Whisper</span>
+                  <span className="text-[10px] opacity-70 font-normal">ローカル・完全無料</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSttEngine("gemini");
+                    try { localStorage.setItem(LS_STT_ENGINE_KEY, "gemini"); } catch {}
+                  }}
+                  className={`py-2 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center gap-0.5 ${
+                    sttEngine === 'gemini'
+                      ? 'bg-blue-500/20 text-blue-200 border border-blue-400/40 shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200 border border-transparent'
+                  }`}
+                >
+                  <span>Gemini 3.5</span>
+                  <span className="text-[10px] opacity-70 font-normal">Transcribe</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSttEngine("deepgram");
+                    try { localStorage.setItem(LS_STT_ENGINE_KEY, "deepgram"); } catch {}
+                  }}
+                  className={`py-2 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center gap-0.5 ${
+                    sttEngine === 'deepgram'
+                      ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/40 shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200 border border-transparent'
+                  }`}
+                >
+                  <span>Deepgram</span>
+                  <span className="text-[10px] opacity-70 font-normal">クラウド超高速</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSttEngine("scribe");
+                    try { localStorage.setItem(LS_STT_ENGINE_KEY, "scribe"); } catch {}
+                  }}
+                  className={`py-2 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center gap-0.5 ${
+                    sttEngine === 'scribe'
+                      ? 'bg-purple-500/20 text-purple-200 border border-purple-400/40 shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200 border border-transparent'
+                  }`}
+                >
+                  <span>ElevenLabs</span>
+                  <span className="text-[10px] opacity-70 font-normal">最高精度</span>
+                </button>
+              </div>
+
+              {/* Gemini が選ばれている場合の直接入力欄 */}
+              {sttEngine === 'gemini' && (
+                <div className="p-3.5 bg-blue-950/40 border border-blue-500/30 rounded-2xl space-y-2 animate-in fade-in">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold text-blue-200 flex items-center gap-1.5">
+                      🔑 Google Gemini API Key
+                    </span>
+                    <a
+                      href="https://aistudio.google.com/app/apikey"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-teal-400 hover:text-teal-300 underline font-medium"
+                    >
+                      無料APIキーを取得 ↗
+                    </a>
+                  </div>
+                  <input
+                    type="password"
+                    placeholder="AIzaSy... （Google AI StudioのAPIキーを貼り付け）"
+                    value={geminiApiKey}
+                    onChange={(e) => {
+                      setGeminiApiKey(e.target.value);
+                      try { localStorage.setItem(LS_GEMINI_KEY_KEY, e.target.value); } catch {}
+                    }}
+                    className={`w-full bg-slate-900 border rounded-xl px-3 py-2 text-sm text-slate-200 focus:outline-none font-mono ${
+                      !geminiApiKey.trim() ? 'border-amber-500/50 focus:border-amber-400' : 'border-blue-500/40 focus:border-blue-400'
+                    }`}
+                  />
+                  {!geminiApiKey.trim() ? (
+                    <p className="text-[11px] text-amber-300/90 flex items-center gap-1">
+                      ⚠️ Gemini を利用するには API キーが必要です。または上の「Whisper」を選べばキー不要で無料利用できます。
+                    </p>
+                  ) : (
+                    <p className="text-[11px] text-emerald-400 flex items-center gap-1">
+                      ✓ APIキー設定済み（ブラウザに自動保存）
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Deepgram が選ばれている場合の直接入力欄 */}
+              {sttEngine === 'deepgram' && (
+                <div className="p-3.5 bg-cyan-950/40 border border-cyan-500/30 rounded-2xl space-y-2 animate-in fade-in">
+                  <span className="font-semibold text-xs text-cyan-200 block">
+                    🔑 Deepgram API Key
+                  </span>
+                  <input
+                    type="password"
+                    placeholder="DeepgramのAPIキーを入力"
+                    value={deepgramApiKey}
+                    onChange={(e) => {
+                      setDeepgramApiKey(e.target.value);
+                      try { localStorage.setItem(LS_DEEPGRAM_KEY_KEY, e.target.value); } catch {}
+                    }}
+                    className="w-full bg-slate-900 border border-cyan-500/40 rounded-xl px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-400 font-mono"
+                  />
+                </div>
+              )}
+
+              {/* ElevenLabs が選ばれている場合の直接入力欄 */}
+              {sttEngine === 'scribe' && (
+                <div className="p-3.5 bg-purple-950/40 border border-purple-500/30 rounded-2xl space-y-2 animate-in fade-in">
+                  <span className="font-semibold text-xs text-purple-200 block">
+                    🔑 ElevenLabs API Key
+                  </span>
+                  <input
+                    type="password"
+                    placeholder="ElevenLabsのAPIキーを入力"
+                    value={scribeApiKey}
+                    onChange={(e) => {
+                      setScribeApiKey(e.target.value);
+                      try { localStorage.setItem(LS_SCRIBE_KEY_KEY, e.target.value); } catch {}
+                    }}
+                    className="w-full bg-slate-900 border border-purple-500/40 rounded-xl px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-purple-400 font-mono"
+                  />
+                </div>
+              )}
+            </div>
+
             <div 
               onClick={handleUploadClick}
               onDragOver={handleDragOver}
@@ -1098,6 +1996,272 @@ export default function Home() {
                 </button>
               </div>
             )}
+
+            {/* 事前話者登録（オプション - ワイド展開版） */}
+            <div className="bg-[#0e2a3d]/60 backdrop-blur-sm border border-purple-500/30 rounded-3xl p-6 shadow-xl space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-purple-500/20">
+                <label className="text-sm font-semibold text-purple-200 flex items-center gap-2 cursor-pointer">
+                  <Users className="w-5 h-5 text-purple-400" />
+                  事前に参加者名を登録して認識精度UP
+                </label>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400">{usePreRegistration ? '有効' : '無効'}</span>
+                  <input
+                    type="checkbox"
+                    checked={usePreRegistration}
+                    onChange={(e) => setUsePreRegistration(e.target.checked)}
+                    className="w-5 h-5 accent-purple-500 rounded cursor-pointer"
+                  />
+                </div>
+              </div>
+
+              {usePreRegistration && (
+                <div className="space-y-4 animate-in fade-in duration-200 pt-1">
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    あらかじめ参加者名・読み・役割を登録しておくことで、AIが固有名詞や話者分離をより正確に認識します。
+                  </p>
+
+                  {/* 話者数目安セレクター */}
+                  <div className="bg-slate-900/60 p-3 rounded-xl border border-purple-500/20 flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-purple-300 flex items-center gap-1.5">
+                      <Users className="w-4 h-4 text-purple-400" />
+                      参加人数（話者数）の目安:
+                    </span>
+                    <div className="flex items-center gap-1">
+                      {[
+                        { val: "auto", label: "自動判定" },
+                        { val: "2", label: "2人（対談・面談）" },
+                        { val: "3", label: "3人" },
+                        { val: "4", label: "4人" },
+                        { val: "5+", label: "5人以上" },
+                      ].map((item) => (
+                        <button
+                          key={item.val}
+                          type="button"
+                          onClick={() => setSpeakerCountHint(item.val)}
+                          className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all ${
+                            speakerCountHint === item.val
+                              ? "bg-purple-500 text-white shadow-sm shadow-purple-500/30"
+                              : "bg-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-700/50"
+                          }`}
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="space-y-3">
+                    {preRegisteredSpeakers.map((sp) => (
+                      <div key={sp.id} className="flex flex-wrap md:flex-nowrap items-center gap-3 bg-slate-900/40 p-3 rounded-2xl border border-slate-700/50">
+                        <div className="flex-1 min-w-[150px]">
+                          <label className="block text-[11px] text-slate-400 font-medium mb-1">名前（漢字）</label>
+                          <input
+                            type="text"
+                            list="speaker-name-suggestions"
+                            placeholder="例: 山田太郎"
+                            value={sp.name}
+                            onChange={(e) => updatePreRegisteredSpeaker(sp.id, 'name', e.target.value)}
+                            className="w-full bg-[#0c1929] border border-purple-500/30 rounded-xl py-2 px-3 text-sm text-purple-200 placeholder-slate-500 focus:outline-none focus:border-purple-400"
+                          />
+                        </div>
+                        <div className="flex-1 min-w-[130px]">
+                          <label className="block text-[11px] text-slate-400 font-medium mb-1">ふりがな（任意）</label>
+                          <input
+                            type="text"
+                            placeholder="例: やまだたろう"
+                            value={sp.reading}
+                            onChange={(e) => updatePreRegisteredSpeaker(sp.id, 'reading', e.target.value)}
+                            className="w-full bg-[#0c1929] border border-purple-500/30 rounded-xl py-2 px-3 text-sm text-purple-200 placeholder-slate-500 focus:outline-none focus:border-purple-400"
+                          />
+                        </div>
+                        <div className="w-full md:w-40">
+                          <label className="block text-[11px] text-slate-400 font-medium mb-1">カテゴリ（役割）</label>
+                          <select
+                            value={sp.role}
+                            onChange={(e) => updatePreRegisteredSpeaker(sp.id, 'role', e.target.value)}
+                            className="w-full bg-[#0c1929] border border-purple-500/30 rounded-xl py-2 px-3 text-sm text-slate-200 focus:outline-none focus:border-purple-400"
+                          >
+                            <option value="参加者">参加者</option>
+                            <option value="アーティスト">アーティスト</option>
+                            <option value="ファシリテーター">ファシリテーター</option>
+                            <option value="オブザーバー">オブザーバー</option>
+                            <option value="通訳">通訳</option>
+                          </select>
+                        </div>
+                        {preRegisteredSpeakers.length > 1 && (
+                          <div className="self-end md:self-center pt-2 md:pt-5">
+                            <button
+                              type="button"
+                              onClick={() => removePreRegisteredSpeaker(sp.id)}
+                              className="p-2 rounded-xl hover:bg-red-500/20 text-slate-400 hover:text-red-400 transition-colors"
+                              title="この参加者を削除"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={addPreRegisteredSpeaker}
+                    className="w-full py-2.5 rounded-xl text-sm font-medium bg-purple-500/10 text-purple-300 border border-purple-500/20 border-dashed hover:bg-purple-500/20 hover:border-purple-500/40 transition-all flex items-center justify-center gap-2"
+                  >
+                    <CopyPlus className="w-4 h-4" />
+                    参加者を追加する
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* 📚 専門用語・カスタム辞書（タグ選択） */}
+            <div className="bg-[#0e2a3d]/60 backdrop-blur-sm border border-cyan-800/30 rounded-3xl p-6 shadow-xl space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400">
+                    <BookOpen className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-base text-cyan-50">専門用語・カスタム辞書（タグ選択）</h3>
+                    <p className="text-xs text-slate-400">
+                      単語タグをクリックしてON/OFF。音声（読み）から正確な漢字・表記にAIが自動変換します。
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 self-end sm:self-center">
+                  <button
+                    type="button"
+                    onClick={() => setAllCustomWords(true)}
+                    className="text-xs px-2.5 py-1.5 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-300 border border-blue-500/30 transition-colors"
+                  >
+                    全選択
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAllCustomWords(false)}
+                    className="text-xs px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 border border-slate-700 transition-colors"
+                  >
+                    全解除
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowAddWordForm(!showAddWordForm)}
+                    className="text-xs px-3 py-1.5 rounded-lg bg-gradient-to-r from-blue-600 to-teal-600 hover:from-blue-500 hover:to-teal-500 text-white font-medium shadow-sm transition-all flex items-center gap-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    単語を追加
+                  </button>
+                </div>
+              </div>
+
+              {/* 単語追加フォーム（展開時） */}
+              {showAddWordForm && (
+                <div className="p-4 rounded-2xl bg-slate-900/80 border border-blue-500/30 space-y-3 animate-in fade-in duration-200">
+                  <div className="text-xs font-semibold text-blue-300">新しい単語・専門用語の登録</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-[11px] text-slate-400 font-medium mb-1">表示名（漢字・英字） <span className="text-red-400">*</span></label>
+                      <input
+                        type="text"
+                        placeholder="例: 観自在力, ChatGPT"
+                        value={newWordTerm}
+                        onChange={(e) => setNewWordTerm(e.target.value)}
+                        className="w-full bg-[#0c1929] border border-blue-500/30 rounded-xl py-2 px-3 text-sm text-blue-200 placeholder-slate-500 focus:outline-none focus:border-blue-400"
+                        onKeyDown={(e) => { if (e.key === 'Enter') addCustomWord(); }}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-400 font-medium mb-1">読み（ひらがな・任意）</label>
+                      <input
+                        type="text"
+                        placeholder="例: かんじざいりょく"
+                        value={newWordReading}
+                        onChange={(e) => setNewWordReading(e.target.value)}
+                        className="w-full bg-[#0c1929] border border-blue-500/30 rounded-xl py-2 px-3 text-sm text-blue-200 placeholder-slate-500 focus:outline-none focus:border-blue-400"
+                        onKeyDown={(e) => { if (e.key === 'Enter') addCustomWord(); }}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-400 font-medium mb-1">カテゴリ</label>
+                      <select
+                        value={newWordCategory}
+                        onChange={(e) => setNewWordCategory(e.target.value)}
+                        className="w-full bg-[#0c1929] border border-blue-500/30 rounded-xl py-2 px-3 text-sm text-slate-200 focus:outline-none focus:border-blue-400"
+                      >
+                        <option value="専門用語">専門用語</option>
+                        <option value="サービス・作品名">サービス・作品名</option>
+                        <option value="人名・組織">人名・組織</option>
+                        <option value="その他">その他</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="flex justify-end gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setShowAddWordForm(false)}
+                      className="px-3 py-1.5 rounded-xl text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
+                    >
+                      キャンセル
+                    </button>
+                    <button
+                      type="button"
+                      onClick={addCustomWord}
+                      disabled={!newWordTerm.trim()}
+                      className="px-4 py-1.5 rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white shadow-sm transition-all"
+                    >
+                      追加してタグ保存
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* 単語タグ一覧（ピル・チップ形式） */}
+              <div className="flex flex-wrap gap-2 pt-1 min-h-[42px] items-center">
+                {customWords.length === 0 ? (
+                  <p className="text-xs text-slate-500 py-1">登録された単語はありません。「単語を追加」から登録してください。</p>
+                ) : (
+                  customWords.map((word) => {
+                    const isEnabled = word.enabled;
+                    return (
+                      <div
+                        key={word.id}
+                        onClick={() => toggleCustomWord(word.id)}
+                        className={`group inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-medium transition-all cursor-pointer select-none ${
+                          isEnabled
+                            ? 'bg-gradient-to-r from-blue-600/30 to-teal-600/30 border-blue-400/50 text-blue-100 shadow-sm shadow-blue-900/20 hover:border-blue-300'
+                            : 'bg-slate-900/40 border-slate-700/50 text-slate-400 opacity-60 hover:opacity-100'
+                        }`}
+                      >
+                        <div className={`w-2 h-2 rounded-full transition-colors ${isEnabled ? 'bg-teal-400 shadow-[0_0_8px_rgba(45,212,191,0.8)]' : 'bg-slate-600'}`} />
+                        <span className="font-semibold text-slate-100">{word.term}</span>
+                        {word.reading && (
+                          <span className={`text-[11px] ${isEnabled ? 'text-blue-300' : 'text-slate-500'}`}>
+                            （{word.reading}）
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeCustomWord(word.id);
+                          }}
+                          className="ml-1 p-0.5 rounded-md hover:bg-red-500/20 hover:text-red-300 text-slate-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="この単語を削除"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              <div className="text-[11px] text-slate-400 flex items-center justify-between pt-2 border-t border-slate-700/30">
+                <span>選択中: <strong className="text-teal-300 font-bold">{customWords.filter(w => w.enabled && w.term.trim()).length}</strong> / {customWords.length} 語</span>
+                <span>※文字起こし・推敲時に自動注入されます</span>
+              </div>
+            </div>
           </div>
 
           {/* Sidebar Options Column */}
@@ -1185,6 +2349,120 @@ export default function Home() {
                         </button>
                       );
                     })}
+                  </div>
+
+                  {selectedServerId === 'local-pc' && (
+                    <div className="p-2.5 rounded-xl bg-violet-950/40 border border-violet-800/40 text-[11px] text-violet-300 flex items-start gap-2">
+                      <span className="text-sm">💻</span>
+                      <span>このPC（AMD Ryzen AI Max / Radeon 8060S・8050S）で文字起こしを実行する場合は、ローカル環境で <code>ai-transcriber/backend/start_local.bat</code> を起動してください。</span>
+                    </div>
+                  )}
+                  {selectedServerId === 'remote-pc' && (
+                    <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-700/40 text-[11px] text-slate-400 flex items-start gap-2">
+                      <span className="text-sm">ℹ️</span>
+                      <span>eGPU2（M7 Ultra / RTX 2080 Ti 22GB）で文字起こしを行う場合は、M7 Ultra 上で <code>start_backend.bat</code> を実行してください（LM Studio は稼働中）。</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* 要約モード設定 */}
+                <div className="space-y-3 pt-2">
+                  <h3 className="text-sm font-medium text-slate-300 px-1 flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-teal-400" /> 要約モード設定
+                  </h3>
+                  <div className="p-4 rounded-2xl bg-slate-900/40 border border-slate-700/50 space-y-4">
+                    {/* モード選択 */}
+                    <div className="space-y-2">
+                      <label className="text-xs text-slate-400 block font-medium">要約の形式</label>
+                      <div className="grid grid-cols-2 gap-2 bg-[#0c1929] p-1 rounded-xl">
+                        <button
+                          type="button"
+                          onClick={() => setMode("yurupaka")}
+                          className={`
+                            py-2 px-3 text-xs font-semibold rounded-lg transition-all duration-200 flex items-center justify-center gap-1.5
+                            ${mode === "yurupaka" 
+                              ? 'bg-gradient-to-r from-teal-500/20 to-cyan-500/20 text-teal-200 border border-teal-400/30' 
+                              : 'text-slate-400 hover:text-slate-200 border border-transparent'}
+                          `}
+                        >
+                          🦙 ゆるパカ鑑賞会
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setMode("general")}
+                          className={`
+                            py-2 px-3 text-xs font-semibold rounded-lg transition-all duration-200 flex items-center justify-center gap-1.5
+                            ${mode === "general" 
+                              ? 'bg-gradient-to-r from-teal-500/20 to-cyan-500/20 text-teal-200 border border-teal-400/30' 
+                              : 'text-slate-400 hover:text-slate-200 border border-transparent'}
+                          `}
+                        >
+                          👔 一般対話・会議
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 音声認識エンジン・APIキー設定ボタン */}
+                    <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-700/60 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
+                          <Server className="w-3.5 h-3.5 text-cyan-400" />
+                          音声認識エンジン
+                        </label>
+                        <button
+                          onClick={() => setShowEngineModal(true)}
+                          className="text-[11px] px-2.5 py-1 rounded-lg bg-cyan-500/10 text-cyan-300 border border-cyan-500/30 hover:bg-cyan-500/20 transition-colors font-medium flex items-center gap-1"
+                        >
+                          <Settings className="w-3 h-3" />
+                          設定・APIキー
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="font-semibold text-teal-300 bg-teal-500/15 px-2 py-0.5 rounded border border-teal-500/20">
+                          {sttEngine === "whisper" && "Whisper (ローカル・無料)"}
+                          {sttEngine === "gemini" && "Gemini 3.5 Transcribe (最先端・最高精度)"}
+                          {sttEngine === "deepgram" && "Deepgram (クラウド超高速)"}
+                          {sttEngine === "scribe" && "ElevenLabs Scribe (最高精度)"}
+                        </span>
+                      </div>
+                    </div>
+
+
+                    {/* 枚数指定（ゆるパカモード時のみ） */}
+                    {mode === "yurupaka" && (
+                      <div className="space-y-2 animate-in fade-in slide-in-from-top-2 duration-200">
+                        <div className="flex justify-between items-center">
+                          <label className="text-xs text-slate-400 block font-medium">絵画の枚数（作品数）</label>
+                          <span className="text-[11px] text-teal-300 font-medium">
+                            {paintingCount === 0 ? "自動判定" : `${paintingCount} 枚`}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <input
+                            type="range"
+                            min="0"
+                            max="10"
+                            value={paintingCount}
+                            onChange={(e) => setPaintingCount(Number(e.target.value))}
+                            className="flex-1 accent-teal-400 bg-slate-800 h-1.5 rounded-lg appearance-none cursor-pointer"
+                          />
+                          <input
+                            type="number"
+                            min="0"
+                            max="20"
+                            value={paintingCount}
+                            onChange={(e) => {
+                              const val = Math.max(0, Number(e.target.value));
+                              setPaintingCount(val);
+                            }}
+                            className="w-16 bg-[#0c1929] border border-slate-700/50 rounded-lg py-1 px-2 text-xs font-mono text-center text-teal-200 focus:outline-none focus:border-teal-400"
+                          />
+                        </div>
+                        <p className="text-[10px] text-slate-500 leading-normal">
+                          ※鑑賞された絵画の正確な枚数を指定すると、要約のセクション分割が正確になります。0 の場合はAIが自動で切り替えを判定します。
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -1366,18 +2644,39 @@ export default function Home() {
               <h2 className="text-2xl font-bold flex items-center gap-3 text-cyan-50">
                 <CheckCircle2 className="text-teal-400" />
                 文字起こし結果
-                <span className="text-sm font-normal text-cyan-300/50">({result.segments.length} セグメント / {uniqueSpeakers.length} 話者)</span>
+                <span className="text-sm font-normal text-cyan-300/50">({result.segments?.length || 0} セグメント / {uniqueSpeakers.length} 話者)</span>
               </h2>
-              {isAdmin && (
+              <div className="flex items-center gap-2">
                 <button
-                  onClick={saveCurrentSession}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25 transition-all hover:scale-105 active:scale-95"
-                  title="現在の結果を保存"
+                  type="button"
+                  onClick={handleRefineSpeakers}
+                  disabled={isRefiningSpeakers}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-purple-500/15 text-purple-300 border border-purple-500/30 hover:bg-purple-500/25 transition-all active:scale-95 disabled:opacity-50"
+                  title="文脈・敬語・相槌をAIが分析して話者を綺麗に再分割・再割り当てします"
                 >
-                  <Save className="w-4 h-4" />
-                  {currentSessionId ? '上書き保存' : '保存'}
+                  <Sparkles className={`w-3.5 h-3.5 ${isRefiningSpeakers ? 'animate-spin' : ''}`} />
+                  {isRefiningSpeakers ? '話者再分離中...' : '🪄 AI話者再分離'}
                 </button>
-              )}
+                <button
+                  type="button"
+                  onClick={applyDictionaryToCurrentResult}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-blue-500/15 text-blue-300 border border-blue-500/30 hover:bg-blue-500/25 transition-all active:scale-95"
+                  title="登録済みの専門用語辞書ルールをこの文字起こし結果に再適用します"
+                >
+                  <BookOpen className="w-3.5 h-3.5" />
+                  辞書ルールを反映
+                </button>
+                {isAdmin && (
+                  <button
+                    onClick={saveCurrentSession}
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25 transition-all hover:scale-105 active:scale-95"
+                    title="現在の結果を保存"
+                  >
+                    <Save className="w-4 h-4" />
+                    {currentSessionId ? '上書き保存' : '保存'}
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Speaker Name Mapping */}
@@ -1523,15 +2822,16 @@ export default function Home() {
                 <div className="space-y-3 max-h-[600px] overflow-y-auto pr-2">
                   {result.segments.map((segment: any, idx: number) => {
                     const c = getSpeakerColor(segment.speaker);
+                    const segId = segment.id || `seg-${idx}-${segment.speaker}`;
                     return (
-                      <div key={`seg-${idx}-${segment.speaker}`} className="group relative">
+                      <div key={segId} className="group relative">
                         {/* Header: 話者選択 + タイムスタンプ + 操作ボタン */}
                         <div className="flex items-center gap-2 mb-1">
                           {/* 話者プルダウン */}
                           <div className="relative">
                             <select
                               value={segment.speaker}
-                              onChange={(e) => updateSegmentSpeaker(idx, e.target.value)}
+                              onChange={(e) => updateSegmentSpeaker(segment.id || idx, e.target.value)}
                               className={`appearance-none pl-2 pr-6 py-1 rounded-lg text-xs font-bold cursor-pointer border ${c.bg} ${c.text} ${c.border} bg-transparent focus:outline-none focus:ring-1 focus:ring-cyan-400/50`}
                             >
                               {allSpeakers.map(sp => (
@@ -1550,18 +2850,19 @@ export default function Home() {
                           {/* 操作ボタン（ホバーで表示） */}
                           <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                             <button
-                              onClick={() => duplicateSegment(idx)}
+                              onClick={() => duplicateSegment(segment.id || idx)}
                               className="p-1 hover:bg-cyan-500/20 rounded-md transition-colors" title="ブロックを複製"
                             >
                               <CopyPlus className="w-3.5 h-3.5 text-cyan-400" />
                             </button>
                             <button
                               onClick={() => {
-                                if (result.segments.length <= 1) return;
-                                deleteSegment(idx);
+                                if (result.segments.length <= 1) {
+                                  if (!confirm("最後の1つのブロックです。削除しますか？")) return;
+                                }
+                                deleteSegment(segment.id || idx);
                               }}
-                              disabled={result.segments.length <= 1}
-                              className="p-1 hover:bg-red-500/20 rounded-md transition-colors disabled:opacity-30" title="ブロックを削除"
+                              className="p-1 hover:bg-red-500/20 rounded-md transition-colors" title="ブロックを削除"
                             >
                               <Trash2 className="w-3.5 h-3.5 text-red-400" />
                             </button>
@@ -1570,7 +2871,7 @@ export default function Home() {
                         {/* 編集可能テキスト */}
                         <textarea
                           value={segment.text}
-                          onChange={(e) => updateSegmentText(idx, e.target.value)}
+                          onChange={(e) => updateSegmentText(segment.id || idx, e.target.value)}
                           rows={Math.max(2, Math.ceil(segment.text.length / 50))}
                           className="w-full bg-[#0e2a3d]/60 border border-cyan-800/30 rounded-2xl rounded-tl-none px-4 py-3 text-cyan-50 text-base leading-relaxed resize-y focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20 transition-colors"
                         />
@@ -1735,6 +3036,201 @@ export default function Home() {
           </div>
         )}
       </div>
+
+      {/* 音声認識エンジン・APIキー設定モーダル */}
+      {showEngineModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+          <div className="bg-[#0f172a] border border-slate-700 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                <Server className="w-5 h-5 text-cyan-400" />
+                音声認識エンジン・APIキー設定
+              </h3>
+              <button
+                onClick={() => setShowEngineModal(false)}
+                className="text-slate-400 hover:text-slate-200 text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-xs font-semibold text-slate-300 block">
+                  使用する音声認識エンジン
+                </label>
+                <div className="space-y-2">
+                  <label className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all ${sttEngine === 'whisper' ? 'bg-teal-500/10 border-teal-500/50 text-teal-200' : 'bg-slate-900/50 border-slate-800 text-slate-400 hover:bg-slate-800/50'}`}>
+                    <input
+                      type="radio"
+                      name="engine"
+                      value="whisper"
+                      checked={sttEngine === 'whisper'}
+                      onChange={() => {
+                        setSttEngine('whisper');
+                        try { localStorage.setItem(LS_STT_ENGINE_KEY, 'whisper'); } catch {}
+                      }}
+                      className="mt-1 accent-teal-400"
+                    />
+                    <div>
+                      <div className="font-bold text-sm text-slate-200">Whisper (ローカル・完全無料)</div>
+                      <div className="text-xs text-slate-400">GPUサーバー上で動作。費用は一切かかりません。</div>
+                    </div>
+                  </label>
+
+                  <label className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all ${sttEngine === 'gemini' ? 'bg-blue-500/10 border-blue-500/50 text-blue-200' : 'bg-slate-900/50 border-slate-800 text-slate-400 hover:bg-slate-800/50'}`}>
+                    <input
+                      type="radio"
+                      name="engine"
+                      value="gemini"
+                      checked={sttEngine === 'gemini'}
+                      onChange={() => {
+                        setSttEngine('gemini');
+                        try { localStorage.setItem(LS_STT_ENGINE_KEY, 'gemini'); } catch {}
+                      }}
+                      className="mt-1 accent-blue-400"
+                    />
+                    <div>
+                      <div className="font-bold text-sm text-slate-200">Gemini 3.5 Transcribe (最先端・最高精度)</div>
+                      <div className="text-xs text-slate-400">Google AI StudioのAPIキーで動作。最先端Geminiによる圧倒的な日本語認識＆話者分離。</div>
+                    </div>
+                  </label>
+
+                  <label className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all ${sttEngine === 'deepgram' ? 'bg-cyan-500/10 border-cyan-500/50 text-cyan-200' : 'bg-slate-900/50 border-slate-800 text-slate-400 hover:bg-slate-800/50'}`}>
+                    <input
+                      type="radio"
+                      name="engine"
+                      value="deepgram"
+                      checked={sttEngine === 'deepgram'}
+                      onChange={() => {
+                        setSttEngine('deepgram');
+                        try { localStorage.setItem(LS_STT_ENGINE_KEY, 'deepgram'); } catch {}
+                      }}
+                      className="mt-1 accent-cyan-400"
+                    />
+                    <div>
+                      <div className="font-bold text-sm text-slate-200">Deepgram (クラウド超高速)</div>
+                      <div className="text-xs text-slate-400">超高速・高精度な話者分離。初回$200無料枠あり（1時間約40円）。</div>
+                    </div>
+                  </label>
+
+                  <label className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all ${sttEngine === 'scribe' ? 'bg-purple-500/10 border-purple-500/50 text-purple-200' : 'bg-slate-900/50 border-slate-800 text-slate-400 hover:bg-slate-800/50'}`}>
+                    <input
+                      type="radio"
+                      name="engine"
+                      value="scribe"
+                      checked={sttEngine === 'scribe'}
+                      onChange={() => {
+                        setSttEngine('scribe');
+                        try { localStorage.setItem(LS_STT_ENGINE_KEY, 'scribe'); } catch {}
+                      }}
+                      className="mt-1 accent-purple-400"
+                    />
+                    <div>
+                      <div className="font-bold text-sm text-slate-200">ElevenLabs Scribe (最高精度)</div>
+                      <div className="text-xs text-slate-400">最新最先端AI。日本語の会話・相槌に圧倒的に強い（1時間約75円）。</div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              {/* APIキー入力 */}
+              {sttEngine === 'gemini' && (
+                <div className="space-y-3 animate-in fade-in duration-200 pt-2">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-blue-300 flex items-center justify-between">
+                      <span>Gemini API Key</span>
+                      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-[11px] text-teal-400 hover:text-teal-300 underline">
+                        無料APIキーを取得 ↗
+                      </a>
+                    </label>
+                    <input
+                      type="password"
+                      placeholder="AIzaSy... （Google AI StudioのAPIキーを入力）"
+                      value={geminiApiKey}
+                      onChange={(e) => {
+                        setGeminiApiKey(e.target.value);
+                        try { localStorage.setItem(LS_GEMINI_KEY_KEY, e.target.value); } catch {}
+                      }}
+                      className="w-full bg-slate-900 border border-blue-500/40 rounded-xl px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-400 font-mono"
+                    />
+                    <p className="text-[11px] text-slate-400">※一度入力するとブラウザに自動保存されます。</p>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-blue-300 block">
+                      使用するGeminiモデル名
+                    </label>
+                    <input
+                      type="text"
+                      list="gemini-models-list"
+                      placeholder="gemini-3.5-transcribe"
+                      value={geminiModel}
+                      onChange={(e) => {
+                        setGeminiModel(e.target.value);
+                        try { localStorage.setItem(LS_GEMINI_MODEL_KEY, e.target.value); } catch {}
+                      }}
+                      className="w-full bg-slate-900 border border-blue-500/40 rounded-xl px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-400 font-mono"
+                    />
+                    <datalist id="gemini-models-list">
+                      <option value="gemini-3.5-transcribe">gemini-3.5-transcribe（Google最新公式・音声特化モデル）</option>
+                      <option value="gemini-2.0-flash">gemini-2.0-flash（高速・汎用高推論）</option>
+                      <option value="gemini-1.5-pro">gemini-1.5-pro（長文音声・高推論）</option>
+                      <option value="gemini-1.5-flash">gemini-1.5-flash（標準・安定）</option>
+                    </datalist>
+                    <p className="text-[11px] text-slate-400">※推奨: <code>gemini-3.5-transcribe</code>（2026年8月Google公式発表の最新音声文字起こしモデル）</p>
+                  </div>
+                </div>
+              )}
+
+              {sttEngine === 'deepgram' && (
+                <div className="space-y-1.5 animate-in fade-in duration-200 pt-2">
+                  <label className="text-xs font-semibold text-cyan-300 block">
+                    Deepgram API Key
+                  </label>
+                  <input
+                    type="password"
+                    placeholder="APIキーを入力してください"
+                    value={deepgramApiKey}
+                    onChange={(e) => {
+                      setDeepgramApiKey(e.target.value);
+                      try { localStorage.setItem(LS_DEEPGRAM_KEY_KEY, e.target.value); } catch {}
+                    }}
+                    className="w-full bg-slate-900 border border-cyan-500/40 rounded-xl px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-400 font-mono"
+                  />
+                  <p className="text-[11px] text-slate-500">※APIキーはブラウザに保存され、サーバーには永続保存されません。</p>
+                </div>
+              )}
+
+              {sttEngine === 'scribe' && (
+                <div className="space-y-1.5 animate-in fade-in duration-200 pt-2">
+                  <label className="text-xs font-semibold text-purple-300 block">
+                    ElevenLabs API Key (xi-api-key)
+                  </label>
+                  <input
+                    type="password"
+                    placeholder="APIキーを入力してください"
+                    value={scribeApiKey}
+                    onChange={(e) => {
+                      setScribeApiKey(e.target.value);
+                      try { localStorage.setItem(LS_SCRIBE_KEY_KEY, e.target.value); } catch {}
+                    }}
+                    className="w-full bg-slate-900 border border-purple-500/40 rounded-xl px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-purple-400 font-mono"
+                  />
+                  <p className="text-[11px] text-slate-500">※APIキーはブラウザに保存され、サーバーには永続保存されません。</p>
+                </div>
+              )}
+            </div>
+
+            <button
+              onClick={() => setShowEngineModal(false)}
+              className="w-full py-2.5 bg-gradient-to-r from-teal-500 to-cyan-500 text-white rounded-xl font-bold text-sm shadow-lg hover:brightness-110 transition-all"
+            >
+              設定を保存して閉じる
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
