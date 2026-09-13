@@ -265,6 +265,7 @@ interface SavedSession {
   speakerRoles: Record<string, string>;
   refinedText: string | null;
   summary: string | null;
+  work2SplitIndex?: number;
 }
 
 function loadSessions(): SavedSession[] {
@@ -381,7 +382,64 @@ export default function Home() {
   const [isDragging, setIsDragging] = useState(false);
   const [mode, setMode] = useState<"yurupaka" | "general">("yurupaka");
   const [paintingCount, setPaintingCount] = useState<number>(2);
-  
+  const [work2SplitIndex, setWork2SplitIndex] = useState<number>(-1);
+
+  // 🖼️ 2枚目の作品切り替え位置を中盤（30%〜75%優先）から高精度に自動検出する関数
+  const detectWork2SplitIndex = useCallback((segs: any[]): number => {
+    if (!segs || segs.length < 4) return 0;
+    const total = segs.length;
+    const minIdx = Math.max(1, Math.floor(total * 0.25));
+    const maxIdx = Math.min(total - 2, Math.floor(total * 0.85));
+    const centerIdx = Math.floor(total * 0.50);
+
+    let bestIdx = centerIdx;
+    let maxScore = -999;
+
+    const strongKeywords = [
+      /(?:2|２|二)(?:枚目|点目)の?(?:作品|絵画?|画像|スライド|写真)/,
+      /(?:次|つぎ)の(?:作品|絵画?|画像|スライド)に(?:行|いっ|進|移|見て|観て|出|共有|表示|切り替)/,
+      /(?:次|つぎ)の(?:作品|絵画?|アート)を(?:見|観|共有|画面)/,
+      /(?:2|２|二)(?:枚目|点目)に(?:行|いっ|進|移|入)/,
+      /2枚目に行きましょう/,
+      /2枚目の絵/,
+      /次の絵に行きましょう/,
+      /画面を切り替え/,
+      /スライドを切り替え/,
+      /次の作品を共有/,
+    ];
+
+    for (let i = minIdx; i <= maxIdx; i++) {
+      const text = segs[i]?.text || "";
+      if (!text.trim()) continue;
+
+      // 誤爆防止: 指名発言（次、○○さん）は作品切り替えではないためスキップ
+      if (/次(?:は|、|\s)*(?:さん|様|君|ちゃん|方|どうぞ|お願)/.test(text)) continue;
+      
+      // 誤爆防止: 「〜前」「〜の前に」「〜行く前に」「後で2枚目」などの保留パターンは作品切り替えではない
+      if (/(?:前|まえ)に|(?:前|まえ)の|(?:後|あと)で/.test(text)) continue;
+
+      let score = 0;
+      for (const pat of strongKeywords) {
+        if (pat.test(text)) {
+          score += 100;
+        }
+      }
+
+      if (score > 0) {
+        // 中央（50%）に近いほどプラス重み付け（セッションの中央付近の作品切り替えを優遇）
+        const distanceRatio = Math.abs(i - centerIdx) / total;
+        const centerBonus = (0.5 - distanceRatio) * 40;
+        score += centerBonus;
+
+        if (score > maxScore) {
+          maxScore = score;
+          bestIdx = i;
+        }
+      }
+    }
+
+    return bestIdx;
+  }, []);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isRefining, setIsRefining] = useState(false);
   const [isSummarizing, setIsSummarizing] = useState(false);
@@ -874,6 +932,15 @@ export default function Home() {
     checkBackendServers();
   }, [resumePendingJob, checkBackendServers]);
 
+  // 🖼️ セグメントが読み込まれた時に2枚目の境界を自動設定（未設定時のみ）
+  useEffect(() => {
+    if (result?.segments && result.segments.length > 0) {
+      if (work2SplitIndex < 0 || work2SplitIndex >= result.segments.length) {
+        setWork2SplitIndex(detectWork2SplitIndex(result.segments));
+      }
+    }
+  }, [result?.segments, detectWork2SplitIndex, work2SplitIndex]);
+
   // Admin check: call /api/admin-check when session changes
   useEffect(() => {
     if (session?.user?.email) {
@@ -908,6 +975,7 @@ export default function Home() {
       speakerRoles: { ...speakerRoles },
       refinedText: result.refinedText || null,
       summary: result.summary || null,
+      work2SplitIndex: work2SplitIndex > 0 ? work2SplitIndex : undefined,
     };
 
     const existing = loadSessions();
@@ -924,27 +992,33 @@ export default function Home() {
     setCurrentSessionId(sessionData.id);
     setSaveToast(true);
     setTimeout(() => setSaveToast(false), 3000);
-  }, [result, isAdmin, file, currentSessionId, savedSessionsList, selectedServerId, speakerNames, speakerReadings, speakerRoles]);
+  }, [result, isAdmin, file, currentSessionId, savedSessionsList, selectedServerId, speakerNames, speakerReadings, speakerRoles, work2SplitIndex]);
 
   // セッション読み込み
   const loadSession = useCallback((sessionId: string) => {
     const sessions = loadSessions();
     const target = sessions.find(s => s.id === sessionId);
     if (!target) return;
+    const cleanSegments = ensureSegmentIds(target.segments);
     setResult({
-      segments: ensureSegmentIds(target.segments),
+      segments: cleanSegments,
       refinedText: stripThinking(target.refinedText),
       summary: target.summary,
     });
     setSpeakerNames(target.speakerNames || {});
     setSpeakerReadings(target.speakerReadings || {});
     setSpeakerRoles(target.speakerRoles || {});
+    if (typeof target.work2SplitIndex === 'number' && target.work2SplitIndex > 0 && target.work2SplitIndex < cleanSegments.length) {
+      setWork2SplitIndex(target.work2SplitIndex);
+    } else {
+      setWork2SplitIndex(detectWork2SplitIndex(cleanSegments));
+    }
     setCurrentSessionId(target.id);
     setFile(null);
     setJobFileName(target.fileName || '不明なファイル');
     setErrorMsg(null);
     setShowSessionsPanel(false);
-  }, []);
+  }, [detectWork2SplitIndex]);
 
   // セッション削除
   const deleteSession = useCallback((sessionId: string) => {
@@ -1070,6 +1144,11 @@ export default function Home() {
       updated.splice(idx + 1, 0, clone);
       return { ...prev, segments: updated };
     });
+    setWork2SplitIndex(prev => {
+      if (prev <= 0) return prev;
+      const idx = typeof target === 'number' ? target : -1;
+      return idx >= 0 && idx < prev ? prev + 1 : prev;
+    });
   }, []);
 
   const deleteSegment = useCallback((target: string | number) => {
@@ -1079,6 +1158,11 @@ export default function Home() {
         return typeof target === 'string' ? s.id !== target : i !== target;
       });
       return { ...prev, segments: updated };
+    });
+    setWork2SplitIndex(prev => {
+      if (prev <= 0) return prev;
+      const idx = typeof target === 'number' ? target : -1;
+      return idx >= 0 && idx < prev ? Math.max(0, prev - 1) : prev;
     });
   }, []);
 
@@ -1649,6 +1733,7 @@ export default function Home() {
     try {
       // 1. Gemini API Key がある場合は、超大容量・高精度の Gemini 要約 API を最優先で使用
       if (geminiApiKey) {
+        const splitIdx = work2SplitIndex > 0 ? work2SplitIndex : detectWork2SplitIndex(result.segments);
         const res = await fetch("/api/summarize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1659,6 +1744,7 @@ export default function Home() {
             speaker_roles: speakerRoles,
             mode: mode,
             painting_count: paintingCount,
+            split_index: splitIdx,
             api_key: geminiApiKey,
             model: geminiModel,
           }),
@@ -1691,17 +1777,10 @@ export default function Home() {
             ? participants.map((p, i) => `${i + 1}. 【${p.fullName}】`).join("\n")
             : "・参加者";
 
-          const transcriptLines = result.segments.map((s: any) => {
-            const spId = s.speaker || "SPEAKER_00";
-            const name = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
-            return `[${name}] ${s.text || ""}`;
-          });
-          const fullTranscript = transcriptLines.join("\n");
-
           const numWorks = paintingCount > 0 ? Math.max(paintingCount, 2) : 2;
           const makeWorkTemplate = (wIdx: number) => {
             return participants.map(p => 
-              `- #### 【${p.name}】の第${wIdx}枚目に対する発言・着眼点・解釈:\n  （※絶対に省略禁止。第${wIdx}枚目の絵画について ${p.name} が述べた感想、気づき、色彩や構図への指摘、独自の解釈、短い第一印象や相槌・同意まで、その人が語った内容を必ず具体的に文章化して記録すること）`
+              `- #### 【${p.name}】の第${wIdx}枚目に対する発言・着眼点・解釈:\n  （※絶対に省略禁止！【★第${wIdx}枚目の絵画に関する対話テキスト】から、${p.name} が述べた感想、気づき、色彩・構図の指摘、独自解釈、短い第一印象や相槌・同調まで、その人が語った内容を必ず具体的に文章化して記録すること。発言が少なかった場合でも見出しを削除せず、周囲への同調や鑑賞態度を必ず記録すること）`
             ).join("\n\n");
           };
 
@@ -1717,19 +1796,44 @@ export default function Home() {
             );
           }).join("\n\n---\n\n");
 
+          let conversationBlocks = "";
+          if (mode === "yurupaka" && splitIdx > 0 && splitIdx < result.segments.length) {
+            const w1Text = result.segments.slice(0, splitIdx).map((s: any, idx: number) => {
+              const spId = s.speaker || "SPEAKER_00";
+              const name = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
+              return `[#${idx + 1} ${name}] ${s.text || ""}`;
+            }).join("\n");
+            const w2Text = result.segments.slice(splitIdx).map((s: any, idx: number) => {
+              const spId = s.speaker || "SPEAKER_00";
+              const name = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
+              return `[#${splitIdx + idx + 1} ${name}] ${s.text || ""}`;
+            }).join("\n");
+
+            conversationBlocks = (
+              `【★第1枚目の絵画に関する対話テキスト（自己紹介後〜第2枚目提示直前まで：全 ${splitIdx} 発言）】\n` +
+              w1Text + "\n\n" +
+              `【★第2枚目の絵画に関する対話テキスト（第2枚目提示以降〜セッション終了まで：全 ${result.segments.length - splitIdx} 発言）】\n` +
+              w2Text
+            );
+          } else {
+            const transcriptLines = result.segments.map((s: any, idx: number) => {
+              const spId = s.speaker || "SPEAKER_00";
+              const name = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
+              return `[#${idx + 1} ${name}] ${s.text || ""}`;
+            });
+            conversationBlocks = transcriptLines.join("\n");
+          }
+
           const clientPrompt = mode === "yurupaka" ? (
             "あなたは絵画鑑賞会（対話型アート鑑賞）の対話記録から、極めて詳細で充実した要約・鑑賞記録を作成する専門家AIです。\n" +
-            "以下の【鑑賞会の全対話テキスト】を最初から最後まで深く読み込み、一切省略することなく、長文で充実した鑑賞記録を作成してください。\n\n" +
+            "以下の対話テキストを深く読み込み、一切省略することなく、長文で充実した鑑賞記録を作成してください。\n\n" +
             `【参加者全員リスト（全 ${participants.length} 名）】\n` +
             participantListStr + "\n\n" +
-            "【★最重要・絶対厳守の境界判定ルール（第1枚目と第2枚目の区分の徹底）】\n" +
-            "1. 【発言者指名による誤切替の禁止】: ファシリテーターが「では次、○○さんどうぞ」「次の方いかがですか」「じゃあ次は○○さん」と発言者を交代している発言は、作品の切り替えではありません！その指名された参加者の発言は【すべて第1枚目の発言】です。\n" +
-            "2. 【終了前の深掘り発言】: ファシリテーターが「そろそろ次に…」「次の絵に行こうと思いますが」と言った後に参加者が語った意見や、第1枚目の終盤でじっくり語られた長文の深い意見も、【すべて第1枚目の作品に対する発言】です。決して2枚目と混同したり、要約から除外してはなりません！\n" +
-            "3. 【第2枚目の開始地点】: ファシリテーターが実際に画面を切り替え、「2枚目の絵です」「次の作品を見てみましょう」と新しい絵を提示し、参加者がその新しい絵について語り始めた瞬間からが第2枚目です。\n\n" +
-            `【最重要・絶対厳守ルール：すべての作品（第1枚目も、第2枚目も）で参加者全員（全 ${participants.length} 名）の見出しを出力すること】\n` +
-            "1. 上記リストの全参加者（全 " + participants.length + " 名）について、第1枚目にも第2枚目にも、必ず1人1つ見出しを設けて発言を記録してください。\n" +
-            "2. 長文でしっかり意見を述べた参加者の発言はもちろん、短い第一印象や相槌・同意にとどまった参加者まで、全員の発言・着眼点を1人残らず拾い上げてください。\n" +
-            "3. 「第2枚目は全員出ているのに、第1枚目は一部の人しか出ていない」という状態は絶対に許されません。1枚目の対話テキストを最初から丁寧に精査し、全参加者の発言を必ず1枚目の欄に記録してください。\n\n" +
+            `【★最重要・絶対厳守ルール：第1枚目にも第2枚目にも、上記全参加者（全 ${participants.length} 名）の見出しを出力すること】\n` +
+            `1. 【第1枚目の作品】の欄には、必ず【★第1枚目の絵画に関する対話テキスト】を参照し、参加者全員（全 ${participants.length} 名）の「- #### 【お名前】...」の見出しを1人も削らず全員分出力してください。\n` +
+            `2. 【第2枚目の作品】の欄には、必ず【★第2枚目の絵画に関する対話テキスト】を参照し、参加者全員（全 ${participants.length} 名）の「- #### 【お名前】...」の見出しを1人も削らず全員分出力してください。\n` +
+            `3. 「1枚目にこの人がいない」「発言回数が少ない」と勝手に判断して見出しを省くことは絶対に禁止します。発言が短かったり相槌にとどまった参加者であっても、「【お名前】第1枚目の鑑賞では、周囲の〇〇という意見に頷き同調する様子が見られた」「短く〜〜と印象を述べた」のように、必ず全員分の見出しと反応を文章化してください。\n` +
+            "4. 長文でしっかり意見を述べた参加者の発言はもちろん、全員の発言・着眼点を1人残らず拾い上げてください。\n\n" +
             "【構成】\n" +
             "### 【全体概要】\nこの鑑賞会セッション全体の目的、雰囲気、全体の対話の流れ、全体を通して深まった共通テーマを詳細に記述。\n\n" +
             "---\n\n" +
@@ -1737,11 +1841,11 @@ export default function Home() {
             "---\n\n" +
             "### 【感性と対話の深まりの分析】\n参加者の発言から見られた感性的な広がり（観察力、連想力、共感力、多角的な視点など）や対話の深まりを詳細に分析。\n\n" +
             "※前置きや思考プロセスは出力せず、マークダウン本文のみを出力してください。\n\n" +
-            "【鑑賞会の全対話テキスト】\n" + fullTranscript
+            conversationBlocks
           ) : (
             "あなたは会議録作成のエキスパートAIです。全参加者の発言を漏らさず包括的会議録を作成してください。\n\n" +
             `【参加者リスト】\n${participantListStr}\n\n` +
-            "【対話テキスト】\n" + fullTranscript
+            "【対話テキスト】\n" + conversationBlocks
           );
 
           const directRes = await fetch(
@@ -2850,6 +2954,63 @@ export default function Home() {
                   </button>
                 </div>
 
+                {/* 🖼️ 2枚目の作品切り替え位置（境界）設定・確認カード（ゆるパカ鑑賞会モード時） */}
+                {mode === "yurupaka" && result?.segments && result.segments.length > 0 && (
+                  <div className="mt-4 p-4 rounded-2xl bg-gradient-to-r from-amber-500/15 via-orange-500/10 to-amber-500/15 border-2 border-amber-400/50 shadow-lg shadow-amber-500/10 space-y-2.5 animate-in fade-in duration-200">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-amber-200 flex items-center gap-1.5">
+                        <span className="text-base">🖼️</span>
+                        <span>2枚目の作品切り替え位置（境界線）:</span>
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-mono font-extrabold text-amber-300 bg-amber-500/25 px-2.5 py-1 rounded-lg border border-amber-400/40 shadow-sm">
+                          {work2SplitIndex >= 0 ? `発言 #${work2SplitIndex + 1}` : "自動判定中"} / 全 {result.segments.length} 発言
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const newIdx = detectWork2SplitIndex(result.segments);
+                            setWork2SplitIndex(newIdx);
+                          }}
+                          className="text-[11px] px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/40 font-medium transition-colors flex items-center gap-1"
+                          title="会話内容から2枚目の切り替え地点を再探索して自動設定します"
+                        >
+                          <span>🔄</span>
+                          <span>自動再検出</span>
+                        </button>
+                      </div>
+                    </div>
+                    
+                    {/* 2枚目開始行の発言プレビュー */}
+                    <div className="text-xs text-slate-300 bg-slate-950/80 p-2.5 rounded-xl border border-amber-500/25 flex items-start gap-2">
+                      <span className="text-amber-300 font-bold flex-shrink-0 text-[11px] bg-amber-500/20 px-2 py-0.5 rounded border border-amber-500/30">
+                        2枚目開始
+                      </span>
+                      <div className="truncate flex-1">
+                        {work2SplitIndex >= 0 && result.segments[work2SplitIndex] ? (
+                          <>
+                            <span className="text-teal-300 font-bold mr-1">
+                              [{speakerNames[result.segments[work2SplitIndex].speaker] || result.segments[work2SplitIndex].speaker.replace('SPEAKER_', '話者')}]:
+                            </span>
+                            <span className="text-slate-200">
+                              {result.segments[work2SplitIndex].text || "（発言なし）"}
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-slate-500">※境界位置が自動計算されます</span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between text-[11px] text-amber-200/80 gap-1 pt-0.5">
+                      <span>💡 下の文字起こし一覧の各行にある「🖼️ ここから2枚目」ボタンで、1クリックで自由に変更できます。</span>
+                      <span className="font-mono text-xs text-amber-300 font-semibold ml-auto">
+                        第1枚目: {work2SplitIndex > 0 ? work2SplitIndex : Math.floor(result.segments.length / 2)}行 / 第2枚目: {work2SplitIndex > 0 ? result.segments.length - work2SplitIndex : Math.ceil(result.segments.length / 2)}行
+                      </span>
+                    </div>
+                  </div>
+                )}
+
                 {/* Action buttons: Refine & Summarize */}
                 <div className="mt-4 flex flex-wrap gap-3">
                   <button
@@ -2918,58 +3079,98 @@ export default function Home() {
                   {result.segments.map((segment: any, idx: number) => {
                     const c = getSpeakerColor(segment.speaker);
                     const segId = segment.id || `seg-${idx}-${segment.speaker}`;
+                    const isWork2Start = mode === "yurupaka" && idx === work2SplitIndex;
+
                     return (
                       <div key={segId} className="group relative">
-                        {/* Header: 話者選択 + タイムスタンプ + 操作ボタン */}
-                        <div className="flex items-center gap-2 mb-1">
-                          {/* 話者プルダウン */}
-                          <div className="relative">
-                            <select
-                              value={segment.speaker}
-                              onChange={(e) => updateSegmentSpeaker(segment.id || idx, e.target.value)}
-                              className={`appearance-none pl-2 pr-6 py-1 rounded-lg text-xs font-bold cursor-pointer border ${c.bg} ${c.text} ${c.border} bg-transparent focus:outline-none focus:ring-1 focus:ring-cyan-400/50`}
-                            >
-                              {allSpeakers.map(sp => (
-                                <option key={sp} value={sp} className="bg-slate-800 text-slate-200">
-                                  {speakerNames[sp] || sp.replace('SPEAKER_', '話者')}
-                                </option>
-                              ))}
-                            </select>
-                            <ChevronDown className="w-3 h-3 absolute right-1.5 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400" />
+                        {/* 🖼️ 第2枚目の鑑賞開始ディバイダー */}
+                        {isWork2Start && (
+                          <div className="my-3 p-3 rounded-2xl bg-gradient-to-r from-amber-500/25 via-orange-500/20 to-amber-500/25 border-2 border-amber-400/80 shadow-lg shadow-amber-500/20 flex items-center justify-between text-xs text-amber-200 animate-in fade-in zoom-in-95 duration-200">
+                            <div className="flex items-center gap-2.5 font-bold">
+                              <span className="text-xl">🖼️</span>
+                              <div>
+                                <div className="text-sm font-extrabold text-amber-300">ここから【第2枚目】の作品鑑賞</div>
+                                <div className="text-[10px] text-amber-200/80 font-normal">
+                                  （発言 #{idx + 1}〜 / これより上が第1枚目、ここからが第2枚目として要約されます）
+                                </div>
+                              </div>
+                            </div>
+                            <span className="text-[11px] bg-amber-400 text-slate-950 font-bold px-2.5 py-1 rounded-full shadow">
+                              2枚目境界
+                            </span>
                           </div>
-                          {/* タイムスタンプ */}
-                          <span className="text-[10px] text-slate-500 flex items-center gap-1">
-                            <Clock className="w-3 h-3" />
-                            {formatTime(segment.start)} - {formatTime(segment.end)}
-                          </span>
-                          {/* 操作ボタン（ホバーで表示） */}
-                          <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <button
-                              onClick={() => duplicateSegment(segment.id || idx)}
-                              className="p-1 hover:bg-cyan-500/20 rounded-md transition-colors" title="ブロックを複製"
-                            >
-                              <CopyPlus className="w-3.5 h-3.5 text-cyan-400" />
-                            </button>
-                            <button
-                              onClick={() => {
-                                if (result.segments.length <= 1) {
-                                  if (!confirm("最後の1つのブロックです。削除しますか？")) return;
-                                }
-                                deleteSegment(segment.id || idx);
-                              }}
-                              className="p-1 hover:bg-red-500/20 rounded-md transition-colors" title="ブロックを削除"
-                            >
-                              <Trash2 className="w-3.5 h-3.5 text-red-400" />
-                            </button>
+                        )}
+
+                        <div className={`p-1.5 rounded-2xl transition-all ${isWork2Start ? 'border-2 border-amber-400/50 bg-amber-500/5' : ''}`}>
+                          {/* Header: 話者選択 + タイムスタンプ + 「ここから2枚目」ボタン + 操作ボタン */}
+                          <div className="flex items-center gap-2 mb-1 flex-wrap">
+                            {/* 話者プルダウン */}
+                            <div className="relative">
+                              <select
+                                value={segment.speaker}
+                                onChange={(e) => updateSegmentSpeaker(segment.id || idx, e.target.value)}
+                                className={`appearance-none pl-2 pr-6 py-1 rounded-lg text-xs font-bold cursor-pointer border ${c.bg} ${c.text} ${c.border} bg-transparent focus:outline-none focus:ring-1 focus:ring-cyan-400/50`}
+                              >
+                                {allSpeakers.map(sp => (
+                                  <option key={sp} value={sp} className="bg-slate-800 text-slate-200">
+                                    {speakerNames[sp] || sp.replace('SPEAKER_', '話者')}
+                                  </option>
+                                ))}
+                              </select>
+                              <ChevronDown className="w-3 h-3 absolute right-1.5 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400" />
+                            </div>
+                            {/* タイムスタンプ */}
+                            <span className="text-[10px] text-slate-500 flex items-center gap-1">
+                              <Clock className="w-3 h-3" />
+                              {formatTime(segment.start)} - {formatTime(segment.end)}
+                            </span>
+
+                            {/* 🖼️ 「ここから2枚目」指定ボタン（ゆるパカ鑑賞会モード時） */}
+                            {mode === "yurupaka" && (
+                              <button
+                                type="button"
+                                onClick={() => setWork2SplitIndex(idx)}
+                                className={`px-2 py-0.5 rounded-md text-[11px] font-medium flex items-center gap-1 transition-all ${
+                                  idx === work2SplitIndex
+                                    ? 'bg-amber-400 text-slate-950 font-bold shadow-md shadow-amber-400/30'
+                                    : 'text-amber-300/80 hover:text-amber-100 hover:bg-amber-500/20 border border-amber-500/30 bg-amber-500/10'
+                                }`}
+                                title="この発言から2枚目の絵画鑑賞として要約を分割します"
+                              >
+                                <span>🖼️</span>
+                                <span>{idx === work2SplitIndex ? '✅ 2枚目開始位置' : 'ここから2枚目'}</span>
+                              </button>
+                            )}
+
+                            {/* 操作ボタン（ホバーで表示） */}
+                            <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button
+                                onClick={() => duplicateSegment(segment.id || idx)}
+                                className="p-1 hover:bg-cyan-500/20 rounded-md transition-colors" title="ブロックを複製"
+                              >
+                                <CopyPlus className="w-3.5 h-3.5 text-cyan-400" />
+                              </button>
+                              <button
+                                onClick={() => {
+                                  if (result.segments.length <= 1) {
+                                    if (!confirm("最後の1つのブロックです。削除しますか？")) return;
+                                  }
+                                  deleteSegment(segment.id || idx);
+                                }}
+                                className="p-1 hover:bg-red-500/20 rounded-md transition-colors" title="ブロックを削除"
+                              >
+                                <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                              </button>
+                            </div>
                           </div>
+                          {/* 編集可能テキスト */}
+                          <textarea
+                            value={segment.text}
+                            onChange={(e) => updateSegmentText(segment.id || idx, e.target.value)}
+                            rows={Math.max(2, Math.ceil(segment.text.length / 50))}
+                            className="w-full bg-[#0e2a3d]/60 border border-cyan-800/30 rounded-2xl rounded-tl-none px-4 py-3 text-cyan-50 text-base leading-relaxed resize-y focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20 transition-colors"
+                          />
                         </div>
-                        {/* 編集可能テキスト */}
-                        <textarea
-                          value={segment.text}
-                          onChange={(e) => updateSegmentText(segment.id || idx, e.target.value)}
-                          rows={Math.max(2, Math.ceil(segment.text.length / 50))}
-                          className="w-full bg-[#0e2a3d]/60 border border-cyan-800/30 rounded-2xl rounded-tl-none px-4 py-3 text-cyan-50 text-base leading-relaxed resize-y focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20 transition-colors"
-                        />
                       </div>
                     );
                   })}

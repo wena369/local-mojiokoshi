@@ -60,6 +60,7 @@ export async function POST(req: NextRequest) {
       speaker_roles,
       mode = "general",
       painting_count = 0,
+      split_index = 0,
       api_key: reqApiKey,
       model: reqModel,
     } = await req.json();
@@ -97,13 +98,81 @@ export async function POST(req: NextRequest) {
 
     const preferredModel = reqModel || "gemini-2.0-flash";
 
-    // 対話テキストの構築
-    const transcriptLines = segments.map((s: any, idx: number) => {
-      const spId = s.speaker || "SPEAKER_00";
-      const name = speakerMap[spId] || spId.replace("SPEAKER_", "話者");
-      return `[${name}] ${s.text || ""}`;
-    });
-    const fullTranscript = transcriptLines.join("\n");
+    let splitIndexNum = typeof split_index === 'number' && split_index > 0 ? split_index : 0;
+
+    // もし split_index が未指定（0以下）または範囲外の場合、中央（30%〜75%優先）から安全に自動検出
+    if (mode === "yurupaka" && (splitIndexNum <= 0 || splitIndexNum >= segments.length) && segments.length >= 4) {
+      const total = segments.length;
+      const minIdx = Math.max(1, Math.floor(total * 0.25));
+      const maxIdx = Math.min(total - 2, Math.floor(total * 0.85));
+      const centerIdx = Math.floor(total * 0.50);
+
+      let bestIdx = centerIdx;
+      let maxScore = -999;
+
+      const strongKeywords = [
+        /(?:2|２|二)(?:枚目|点目)の?(?:作品|絵画?|画像|スライド|写真)/,
+        /(?:次|つぎ)の(?:作品|絵画?|画像|スライド)に(?:行|いっ|進|移|見て|観て|出|共有|表示|切り替)/,
+        /(?:次|つぎ)の(?:作品|絵画?|アート)を(?:見|観|共有|画面)/,
+        /(?:2|２|二)(?:枚目|点目)に(?:行|いっ|進|移|入)/,
+        /2枚目に行きましょう/,
+        /2枚目の絵/,
+        /次の絵に行きましょう/,
+        /画面を切り替え/,
+        /スライドを切り替え/,
+        /次の作品を共有/,
+      ];
+
+      for (let i = minIdx; i <= maxIdx; i++) {
+        const text = segments[i]?.text || "";
+        if (!text.trim()) continue;
+        if (/次(?:は|、|\s)*(?:さん|様|君|ちゃん|方|どうぞ|お願)/.test(text)) continue;
+        if (/(?:前|まえ)に|(?:前|まえ)の|(?:後|あと)で/.test(text)) continue;
+
+        let score = 0;
+        for (const pat of strongKeywords) {
+          if (pat.test(text)) score += 100;
+        }
+        if (score > 0) {
+          const distanceRatio = Math.abs(i - centerIdx) / total;
+          score += (0.5 - distanceRatio) * 40;
+          if (score > maxScore) {
+            maxScore = score;
+            bestIdx = i;
+          }
+        }
+      }
+      splitIndexNum = bestIdx;
+    }
+
+    // 対話テキストの構築（境界に基づいて第1枚目と第2枚目を完全に物理分離）
+    let conversationBlocks = "";
+    if (mode === "yurupaka" && splitIndexNum > 0 && splitIndexNum < segments.length) {
+      const w1Text = segments.slice(0, splitIndexNum).map((s: any, idx: number) => {
+        const spId = s.speaker || "SPEAKER_00";
+        const name = speakerMap[spId] || spId.replace("SPEAKER_", "話者");
+        return `[#${idx + 1} ${name}] ${s.text || ""}`;
+      }).join("\n");
+      const w2Text = segments.slice(splitIndexNum).map((s: any, idx: number) => {
+        const spId = s.speaker || "SPEAKER_00";
+        const name = speakerMap[spId] || spId.replace("SPEAKER_", "話者");
+        return `[#${splitIndexNum + idx + 1} ${name}] ${s.text || ""}`;
+      }).join("\n");
+
+      conversationBlocks = (
+        `【★第1枚目の絵画に関する対話テキスト（自己紹介後〜第2枚目提示直前まで：全 ${splitIndexNum} 発言）】\n` +
+        w1Text + "\n\n" +
+        `【★第2枚目の絵画に関する対話テキスト（第2枚目提示以降〜セッション終了まで：全 ${segments.length - splitIndexNum} 発言）】\n` +
+        w2Text
+      );
+    } else {
+      const transcriptLines = segments.map((s: any, idx: number) => {
+        const spId = s.speaker || "SPEAKER_00";
+        const name = speakerMap[spId] || spId.replace("SPEAKER_", "話者");
+        return `[#${idx + 1} ${name}] ${s.text || ""}`;
+      });
+      conversationBlocks = transcriptLines.join("\n");
+    }
 
     let prompt = "";
 
@@ -117,7 +186,7 @@ export async function POST(req: NextRequest) {
       // 各作品ごとに全参加者の見出しを穴埋め形式で強制展開
       const makeWorkTemplate = (wIdx: number) => {
         return participants.map(p => 
-          `- #### 【${p.name}】の第${wIdx}枚目に対する発言・着眼点・解釈:\n  （※絶対に省略禁止。第${wIdx}枚目の絵画について ${p.name} が述べた感想、気づき、色彩や構図への指摘、独自の解釈、短い第一印象や相槌・同意まで、その人が語った内容を必ず具体的に文章化して記録すること）`
+          `- #### 【${p.name}】の第${wIdx}枚目に対する発言・着眼点・解釈:\n  （※絶対に省略禁止！【★第${wIdx}枚目の絵画に関する対話テキスト】から、${p.name} が述べた感想、気づき、色彩・構図の指摘、独自解釈、短い第一印象や相槌・同調まで、その人が語った内容を必ず具体的に文章化して記録すること。発言が少なかった場合でも見出しを削除せず、周囲への同調や鑑賞態度を必ず記録すること）`
         ).join("\n\n");
       };
 
@@ -135,18 +204,15 @@ export async function POST(req: NextRequest) {
 
       prompt = (
         "あなたは絵画鑑賞会（対話型アート鑑賞）の対話記録から、極めて詳細で充実した要約・鑑賞記録を作成する専門家AIです。\n" +
-        "以下の【鑑賞会の全対話テキスト】を最初から最後まで深く読み込み、一切省略することなく、長文で充実した鑑賞記録を作成してください。\n\n" +
+        "以下の対話テキストを深く読み込み、一切省略することなく、長文で充実した鑑賞記録を作成してください。\n\n" +
         `【参加者全員リスト（全 ${participants.length} 名）】\n` +
         participantListStr + "\n\n" +
         pCountHint +
-        "【★最重要・絶対厳守の境界判定ルール（第1枚目と第2枚目の区分の徹底）】\n" +
-        "1. 【発言者指名による誤切替の禁止】: ファシリテーターが「では次、○○さんどうぞ」「次の方いかがですか」「じゃあ次は○○さん」と発言者を交代している発言は、作品の切り替えではありません！その指名された参加者の発言は【すべて第1枚目の発言】です。\n" +
-        "2. 【終了前の深掘り発言】: ファシリテーターが「そろそろ次に…」「次の絵に行こうと思いますが」と言った後に参加者が語った意見や、第1枚目の終盤でじっくり語られた長文の深い意見も、【すべて第1枚目の作品に対する発言】です。決して2枚目と混同したり、要約から除外してはなりません！\n" +
-        "3. 【第2枚目の開始地点】: ファシリテーターが実際に画面を切り替え、「2枚目の絵です」「次の作品を見てみましょう」と新しい絵を提示し、参加者がその新しい絵について語り始めた瞬間からが第2枚目です。\n\n" +
-        `【最重要・絶対厳守ルール：すべての作品（第1枚目も、第2枚目も）で参加者全員（全 ${participants.length} 名）の見出しを出力すること】\n` +
-        "1. 上記リストの全参加者（全 " + participants.length + " 名）について、第1枚目にも第2枚目にも、必ず1人1つ見出しを設けて発言を記録してください。\n" +
-        "2. 長文でしっかり意見を述べた参加者の発言はもちろん、短い第一印象や相槌・同意にとどまった参加者まで、全員の発言・着眼点を1人残らず拾い上げてください。\n" +
-        "3. 「第2枚目は全員出ているのに、第1枚目は一部の人しか出ていない」という状態は絶対に許されません。1枚目の対話テキストを最初から丁寧に精査し、全参加者の発言を必ず1枚目の欄に記録してください。\n\n" +
+        `【★最重要・絶対厳守ルール：第1枚目にも第2枚目にも、上記全参加者（全 ${participants.length} 名）の見出しを出力すること】\n` +
+        `1. 【第1枚目の作品】の欄には、必ず【★第1枚目の絵画に関する対話テキスト】を参照し、参加者全員（全 ${participants.length} 名）の「- #### 【お名前】...」の見出しを1人も削らず全員分出力してください。\n` +
+        `2. 【第2枚目の作品】の欄には、必ず【★第2枚目の絵画に関する対話テキスト】を参照し、参加者全員（全 ${participants.length} 名）の「- #### 【お名前】...」の見出しを1人も削らず全員分出力してください。\n` +
+        `3. 「1枚目にこの人がいない」「発言回数が少ない」と勝手に判断して見出しを省くことは絶対に禁止します。発言が短かったり相槌にとどまった参加者であっても、「【お名前】第1枚目の鑑賞では、周囲の〇〇という意見に頷き同調する様子が見られた」「短く〜〜と印象を述べた」のように、必ず全員分の見出しと反応を文章化してください。\n` +
+        "4. 長文でしっかり意見を述べた参加者の発言はもちろん、全員の発言・着眼点を1人残らず拾い上げてください。\n\n" +
         "【構成】\n" +
         "### 【全体概要】\n" +
         "この鑑賞会セッション全体の目的、雰囲気、全体の対話の流れ、全体を通して深まった共通テーマを詳細に記述してください。\n\n" +
@@ -156,8 +222,7 @@ export async function POST(req: NextRequest) {
         "### 【感性と対話の深まりの分析】\n" +
         "参加者の発言から見られた感性的な広がり（観察力、連想力、共感力、多角的な視点など）や、対話によってどのように鑑賞が深まったかを詳細に分析してください。\n\n" +
         "※前置きや思考プロセス、解説は一切出力せず、マークダウン本文のみを直接出力してください。\n\n" +
-        "【鑑賞会の全対話テキスト】\n" +
-        fullTranscript
+        conversationBlocks
       );
     } else {
       // 一般会議モード
@@ -183,7 +248,7 @@ export async function POST(req: NextRequest) {
         "### 【今後のアクションアイテム・保留事項】\n・担当者や期限、今後の課題。\n\n" +
         "※前置きや思考プロセス、解説は一切出力せず、マークダウン本文のみを直接出力してください。\n\n" +
         "【対話テキスト】\n" +
-        fullTranscript
+        conversationBlocks
       );
     }
 
