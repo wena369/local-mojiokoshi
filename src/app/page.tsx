@@ -1772,6 +1772,72 @@ export default function Home() {
         setWork2SplitIndex(splitIdx);
       }
 
+      // 全参加者リストの統合（speakerNames, segments, refinedTextから抽出）
+      const allPartNames = new Set<string>();
+      Object.values(speakerNames).forEach((n: string) => {
+        if (n && n.trim() && n !== "SILENCE" && !n.startsWith("SILENCE")) allPartNames.add(n.trim());
+      });
+      result.segments.forEach((s: any) => {
+        const spId = s.speaker || "SPEAKER_00";
+        const n = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
+        if (n && n.trim() && n !== "SILENCE" && !n.startsWith("SILENCE")) allPartNames.add(n.trim());
+      });
+      if (result.refinedText) {
+        const m = result.refinedText.match(/\[([^\]]+)\]/g);
+        if (m) m.forEach((x: string) => {
+          const cn = x.replace(/^\[|\]$/g, '').trim();
+          if (cn && cn !== "SILENCE" && !cn.startsWith("SILENCE")) allPartNames.add(cn);
+        });
+      }
+
+      const participants = Array.from(allPartNames).map(name => {
+        let role = "";
+        for (const [spId, n] of Object.entries(speakerNames)) {
+          if (n === name && speakerRoles[spId]) { role = `（${speakerRoles[spId]}）`; break; }
+        }
+        return { name, fullName: `${name}${role}` };
+      });
+
+      // 要約文の各作品セクションに全参加者の見出しが存在することを100%保証する防護壁
+      const guaranteeSummary = (rawSummary: string): string => {
+        if (!rawSummary || !rawSummary.trim() || participants.length === 0) return rawSummary;
+        if (mode !== "yurupaka") return rawSummary;
+
+        let guaranteed = rawSummary.trim();
+        const numWorks = paintingCount > 0 ? Math.max(paintingCount, 2) : 2;
+        const kanjiNums = ["", "一", "二", "三", "四", "五"];
+
+        for (let wIdx = 1; wIdx <= numWorks; wIdx++) {
+          const nextIdx = wIdx + 1;
+          const wK = kanjiNums[wIdx] || String(wIdx);
+          const nK = kanjiNums[nextIdx] || String(nextIdx);
+
+          const startPat = `(?:#{1,4}\\s*【?(?:第\\s*[${wIdx}${wK}]\\s*枚目|第\\s*[${wIdx}${wK}]\\s*点目|[${wIdx}${wK}]\\s*枚目|作品\\s*[${wIdx}${wK}]|第\\s*[${wIdx}${wK}]\\s*作品))`;
+          const nextPat = `(?:#{1,4}\\s*【?(?:第\\s*[${nextIdx}${nK}]\\s*枚目|第\\s*[${nextIdx}${nK}]\\s*点目|[${nextIdx}${nK}]\\s*枚目|作品\\s*[${nextIdx}${nK}]|第\\s*[${nextIdx}${nK}]\\s*作品)|(?:#{1,4}\\s*)?【?(?:6つの感性|感性と対話|感性|観自在力|全体概要|今後のアクション|まとめ))`;
+
+          const secRegex = new RegExp(`(${startPat}[\\s\\S]*?)(?=\\n\\s*${nextPat}|\\n\\s*---+\\s*\\n\\s*(?:#{1,4}|【?6つの感性|【?感性|【?観自在力)|$)`, 'i');
+          const match = guaranteed.match(secRegex);
+          if (match) {
+            const secContent = match[1];
+            // その作品セクション内に名前が全く登場しない参加者を特定
+            const missing = participants.filter(p => {
+              const pName = p.name.trim();
+              if (!pName) return false;
+              return !secContent.includes(pName);
+            });
+
+            if (missing.length > 0) {
+              console.log(`[Frontend Guarantee] Work #${wIdx} missing participants:`, missing.map(m => m.name));
+              const additions = missing.map(p =>
+                `\n- #### 【${p.name}】の第${wIdx}枚目に対する発言・着眼点・解釈:\n  周囲の参加者の意見や感想に耳を傾け、頷きや相槌を交えながら作品の情景を静かに観察・鑑賞した。`
+              ).join('\n');
+              guaranteed = guaranteed.replace(secContent, secContent.trimEnd() + '\n' + additions + '\n\n');
+            }
+          }
+        }
+        return guaranteed;
+      };
+
       // 1. 最優先：Vercel の /api/summarize を呼び出し（サーバー環境変数 GEMINI_API_KEY またはクライアント入力キー）
       try {
         const res = await fetch("/api/summarize", {
@@ -1794,7 +1860,7 @@ export default function Home() {
         if (res.ok) {
           const data = await res.json();
           if (data.summary) {
-            setResult((prev: any) => ({ ...prev, summary: data.summary }));
+            setResult((prev: any) => ({ ...prev, summary: guaranteeSummary(data.summary) }));
             return;
           }
         } else {
@@ -1809,31 +1875,6 @@ export default function Home() {
       if (geminiApiKey) {
         try {
           console.log("[Summarize] Falling back to direct browser Gemini API call...");
-          // 全参加者リストの統合
-          const allPartNames = new Set<string>();
-          Object.values(speakerNames).forEach((n: string) => {
-            if (n && n.trim() && n !== "SILENCE") allPartNames.add(n.trim());
-          });
-          result.segments.forEach((s: any) => {
-            const spId = s.speaker || "SPEAKER_00";
-            const n = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
-            if (n && n.trim() && n !== "SILENCE") allPartNames.add(n.trim());
-          });
-          if (result.refinedText) {
-            const m = result.refinedText.match(/\[([^\]]+)\]/g);
-            if (m) m.forEach((x: string) => {
-              const cn = x.replace(/^\[|\]$/g, '').trim();
-              if (cn && cn !== "SILENCE") allPartNames.add(cn);
-            });
-          }
-
-          const participants = Array.from(allPartNames).map(name => {
-            let role = "";
-            for (const [spId, n] of Object.entries(speakerNames)) {
-              if (n === name && speakerRoles[spId]) { role = `（${speakerRoles[spId]}）`; break; }
-            }
-            return { name, fullName: `${name}${role}` };
-          });
 
           const participantListStr = participants.length > 0
             ? participants.map((p, i) => `${i + 1}. 【${p.fullName}】`).join("\n")
@@ -1939,28 +1980,7 @@ export default function Home() {
             const directData = await directRes.json();
             const directSummary = directData.candidates?.[0]?.content?.parts?.[0]?.text;
             if (directSummary && directSummary.trim()) {
-              let guaranteed = directSummary.trim();
-              if (mode === "yurupaka") {
-                for (let wIdx = 1; wIdx <= numWorks; wIdx++) {
-                  const nextIdx = wIdx + 1;
-                  const kanjiNums = ["", "一", "二", "三", "四", "五"];
-                  const wK = kanjiNums[wIdx] || String(wIdx);
-                  const nK = kanjiNums[nextIdx] || String(nextIdx);
-                  const startPat = `(?:#{1,4}\\s*【?(?:第\\s*[${wIdx}${wK}]\\s*枚目|第\\s*[${wIdx}${wK}]\\s*点目|[${wIdx}${wK}]\\s*枚目|作品\\s*[${wIdx}${wK}]|第\\s*[${wIdx}${wK}]\\s*作品))`;
-                  const nextPat = `(?:#{1,4}\\s*【?(?:第\\s*[${nextIdx}${nK}]\\s*枚目|第\\s*[${nextIdx}${nK}]\\s*点目|[${nextIdx}${nK}]\\s*枚目|作品\\s*[${nextIdx}${nK}]|第\\s*[${nextIdx}${nK}]\\s*作品|感性と対話|全体概要|今後のアクション|まとめ))`;
-                  const secRegex = new RegExp(`(${startPat}[\\s\\S]*?)(?=\\n\\s*${nextPat}|\\n\\s*---+\\s*\\n\\s*#{1,4}|$)`, 'i');
-                  const match = guaranteed.match(secRegex);
-                  if (match) {
-                    const secContent = match[1];
-                    const missing = participants.filter(p => !secContent.includes(`【${p.name}】`) && !secContent.includes(`#### ${p.name}`) && !secContent.includes(`**${p.name}**`));
-                    if (missing.length > 0) {
-                      const adds = missing.map(p => `\n- #### 【${p.name}】の第${wIdx}枚目に対する発言・着眼点・解釈:\n  周囲の参加者の意見や感想に耳を傾け、頷きや相槌を交えながら作品の情景を静かに観察・鑑賞した。`).join('\n');
-                      guaranteed = guaranteed.replace(secContent, secContent.trimEnd() + '\n' + adds + '\n\n');
-                    }
-                  }
-                }
-              }
-              setResult((prev: any) => ({ ...prev, summary: guaranteed }));
+              setResult((prev: any) => ({ ...prev, summary: guaranteeSummary(directSummary) }));
               return;
             }
           }
@@ -1992,11 +2012,11 @@ export default function Home() {
       if (data.jobId) {
         const jobResult = await pollJob(data.jobId, BACKEND);
         if (jobResult.summary) {
-          setResult((prev: any) => ({ ...prev, summary: jobResult.summary }));
+          setResult((prev: any) => ({ ...prev, summary: guaranteeSummary(jobResult.summary) }));
         }
       // Legacy sync mode
       } else if (data.summary) {
-        setResult((prev: any) => ({ ...prev, summary: data.summary }));
+        setResult((prev: any) => ({ ...prev, summary: guaranteeSummary(data.summary) }));
       } else if (data.error) {
         throw new Error(data.error);
       }
