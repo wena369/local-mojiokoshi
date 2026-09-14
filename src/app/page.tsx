@@ -386,11 +386,11 @@ export default function Home() {
 
   // 🖼️ 2枚目の作品切り替え位置を中盤（30%〜75%優先）から高精度に自動検出する関数
   const detectWork2SplitIndex = useCallback((segs: any[]): number => {
-    if (!segs || segs.length < 4) return -1;
+    if (!segs || segs.length < 6) return -1;
     const total = segs.length;
-    const minIdx = Math.max(1, Math.floor(total * 0.30));
-    const maxIdx = Math.min(total - 1, Math.floor(total * 0.80));
-    const centerIdx = Math.max(1, Math.floor(total * 0.50));
+    const minIdx = Math.max(3, Math.floor(total * 0.25));
+    const maxIdx = Math.min(total - 2, Math.floor(total * 0.80));
+    const centerIdx = Math.max(minIdx, Math.floor(total * 0.50));
 
     let bestIdx = centerIdx;
     let maxScore = -999;
@@ -834,9 +834,11 @@ export default function Home() {
             summary: statusData.result?.summary || null,
           };
           setResult(completedResult);
-          if (completedResult.segments.length >= 4) {
+          if (completedResult.segments.length >= 6) {
+            const total = completedResult.segments.length;
+            const minValid = Math.max(3, Math.floor(total * 0.20));
             const autoSplit = detectWork2SplitIndex(completedResult.segments);
-            setWork2SplitIndex(autoSplit > 0 ? autoSplit : Math.max(1, Math.floor(completedResult.segments.length * 0.5)));
+            setWork2SplitIndex(autoSplit >= minValid && autoSplit < total ? autoSplit : Math.max(minValid, Math.floor(total * 0.50)));
           }
           try { localStorage.removeItem(LS_JOB_KEY); } catch {}
 
@@ -938,15 +940,21 @@ export default function Home() {
 
   // 🖼️ セグメントが読み込まれた時に2枚目の境界を自動設定（未設定時・または不正値の時に自動検出）
   useEffect(() => {
-    if (result?.segments && result.segments.length >= 4) {
-      if (work2SplitIndex <= 0 || work2SplitIndex >= result.segments.length) {
+    // 音声認識の処理中（ポーリング中）はセグメントが断片的なため自動検出しない
+    if (isProcessing) return;
+
+    if (result?.segments && result.segments.length >= 6) {
+      const total = result.segments.length;
+      const minValid = Math.max(3, Math.floor(total * 0.20));
+
+      // 未設定（<= 0）または異常に手前（minValid未満、例えば1や2など）または範囲外の場合に再検出
+      if (work2SplitIndex < minValid || work2SplitIndex >= total) {
         const detected = detectWork2SplitIndex(result.segments);
-        if (detected > 0) {
-          setWork2SplitIndex(detected);
-        }
+        const safeSplit = detected >= minValid && detected < total ? detected : Math.max(minValid, Math.floor(total * 0.50));
+        setWork2SplitIndex(safeSplit);
       }
     }
-  }, [result?.segments, detectWork2SplitIndex, work2SplitIndex]);
+  }, [result?.segments, detectWork2SplitIndex, work2SplitIndex, isProcessing]);
 
   // Admin check: call /api/admin-check when session changes
   useEffect(() => {
@@ -1015,11 +1023,13 @@ export default function Home() {
     setSpeakerNames(target.speakerNames || {});
     setSpeakerReadings(target.speakerReadings || {});
     setSpeakerRoles(target.speakerRoles || {});
-    if (typeof target.work2SplitIndex === 'number' && target.work2SplitIndex > 0 && target.work2SplitIndex < cleanSegments.length) {
+    const total = cleanSegments.length;
+    const minValid = Math.max(3, Math.floor(total * 0.20));
+    if (typeof target.work2SplitIndex === 'number' && target.work2SplitIndex >= minValid && target.work2SplitIndex < total) {
       setWork2SplitIndex(target.work2SplitIndex);
     } else {
       const autoIdx = detectWork2SplitIndex(cleanSegments);
-      setWork2SplitIndex(autoIdx > 0 ? autoIdx : Math.max(1, Math.floor(cleanSegments.length * 0.5)));
+      setWork2SplitIndex(autoIdx >= minValid && autoIdx < total ? autoIdx : Math.max(minValid, Math.floor(total * 0.50)));
     }
     setCurrentSessionId(target.id);
     setFile(null);
@@ -1433,9 +1443,11 @@ export default function Home() {
         };
 
         setResult(completedResult);
-        if (completedResult.segments.length >= 4) {
+        if (completedResult.segments.length >= 6) {
+          const total = completedResult.segments.length;
+          const minValid = Math.max(3, Math.floor(total * 0.20));
           const autoSplit = detectWork2SplitIndex(completedResult.segments);
-          setWork2SplitIndex(autoSplit > 0 ? autoSplit : Math.max(1, Math.floor(completedResult.segments.length * 0.5)));
+          setWork2SplitIndex(autoSplit >= minValid && autoSplit < total ? autoSplit : Math.max(minValid, Math.floor(total * 0.50)));
         }
 
         // 事前登録話者およびサーバー判定話者名の完全マッピング
@@ -1595,9 +1607,11 @@ export default function Home() {
           console.log('[DEBUG] forwardEmail:', forwardEmail);
           
           setResult(completedResult);
-          if (completedResult.segments.length >= 4) {
+          if (completedResult.segments.length >= 6) {
+            const total = completedResult.segments.length;
+            const minValid = Math.max(3, Math.floor(total * 0.20));
             const autoSplit = detectWork2SplitIndex(completedResult.segments);
-            setWork2SplitIndex(autoSplit > 0 ? autoSplit : Math.max(1, Math.floor(completedResult.segments.length * 0.5)));
+            setWork2SplitIndex(autoSplit >= minValid && autoSplit < total ? autoSplit : Math.max(minValid, Math.floor(total * 0.50)));
           }
           
           // 事前登録話者の自動マッピング（SPEAKER_00, SPEAKER_01 ... へ割り当て）
@@ -1749,8 +1763,14 @@ export default function Home() {
     try {
       // 1. Gemini API Key がある場合は、超大容量・高精度の Gemini 要約 API を最優先で使用
       if (geminiApiKey) {
-        const rawSplit = work2SplitIndex > 0 ? work2SplitIndex : detectWork2SplitIndex(result.segments);
-        const splitIdx = rawSplit > 0 && rawSplit < result.segments.length ? rawSplit : Math.max(1, Math.floor(result.segments.length * 0.5));
+        const total = result.segments.length;
+        const minValid = Math.max(3, Math.floor(total * 0.20));
+        let splitIdx = work2SplitIndex;
+        if (splitIdx < minValid || splitIdx >= total) {
+          const detected = detectWork2SplitIndex(result.segments);
+          splitIdx = detected >= minValid && detected < total ? detected : Math.max(minValid, Math.floor(total * 0.50));
+          setWork2SplitIndex(splitIdx);
+        }
         const res = await fetch("/api/summarize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2986,8 +3006,13 @@ export default function Home() {
                         <button
                           type="button"
                           onClick={() => {
-                            const newIdx = detectWork2SplitIndex(result.segments);
-                            setWork2SplitIndex(newIdx);
+                            if (result?.segments && result.segments.length >= 6) {
+                              const total = result.segments.length;
+                              const minValid = Math.max(3, Math.floor(total * 0.20));
+                              const newIdx = detectWork2SplitIndex(result.segments);
+                              const safeIdx = newIdx >= minValid && newIdx < total ? newIdx : Math.max(minValid, Math.floor(total * 0.50));
+                              setWork2SplitIndex(safeIdx);
+                            }
                           }}
                           className="text-[11px] px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/40 font-medium transition-colors flex items-center gap-1"
                           title="会話内容から2枚目の切り替え地点を再探索して自動設定します"
