@@ -77,31 +77,7 @@ function ensureAllParticipantsInSummary(
     }
 
     const fullMatchedSection = match[1];
-    const missingParticipants: string[] = [];
-
-    for (const p of participants) {
-      const pName = p.name.trim();
-      if (!pName) continue;
-      const hasHeader = fullMatchedSection.includes(`【${pName}】`) ||
-                        fullMatchedSection.includes(`#### ${pName}`) ||
-                        fullMatchedSection.includes(`### ${pName}`) ||
-                        fullMatchedSection.includes(`**${pName}**`) ||
-                        fullMatchedSection.includes(`- ${pName}：`) ||
-                        fullMatchedSection.includes(`- ${pName}:`);
-      if (!hasHeader) {
-        missingParticipants.push(pName);
-      }
-    }
-
-    if (missingParticipants.length > 0) {
-      console.log(`[Summary Guarantee] Work #${wIdx} missing participants: ${missingParticipants.join(', ')}. Auto-appending.`);
-      const additions = missingParticipants.map(name => 
-        `\n- #### 【${name}】の第${wIdx}枚目に対する発言・着眼点・解釈:\n  周囲の参加者の意見や感想に耳を傾け、頷きや相槌を交えながら作品の情景を静かに観察・鑑賞した。`
-      ).join('\n');
-
-      const updatedSec = fullMatchedSection.trimEnd() + '\n' + additions + '\n\n';
-      result = result.replace(fullMatchedSection, updatedSec);
-    }
+    // コピペ文章の機械的追加は廃止（ユーザー指定の正確なテキスト分割によりLLMが自然に全員を要約する）
   }
 
   return result;
@@ -247,16 +223,17 @@ export async function POST(req: NextRequest) {
       if (refined_text && refined_text.trim().length > 100) {
         const refinedLines = refined_text.split("\n").map((l: string) => l.trim()).filter((l: string) => l.length > 0);
         const refTotal = refinedLines.length;
-        // 推敲文内での切り替え位置を探索
-        const minRefIdx = Math.max(1, Math.floor(refTotal * 0.20));
-        const maxRefIdx = Math.min(refTotal - 1, Math.floor(refTotal * 0.85));
-        let bestRefSplit = Math.floor(refTotal * (splitIndexNum / total)); // セグメント比率に基づく初期値
-
-        for (let ri = minRefIdx; ri <= maxRefIdx; ri++) {
-          const line = refinedLines[ri];
-          if (/(?:2|２|二)(?:枚目|点目)|次の(?:絵|作品|スライド|画像)|画面を切り替え/.test(line)) {
-            bestRefSplit = ri;
-            break;
+        // ユーザーが画面で指定した splitIndexNum に正確に同期して推敲文を分割（序盤での誤爆を完全防止）
+        let bestRefSplit = Math.max(1, Math.min(refTotal - 1, Math.round(refTotal * (splitIndexNum / total))));
+        const targetSegText = (segments[splitIndexNum]?.text || "").trim().slice(0, 15);
+        if (targetSegText.length >= 4) {
+          const searchStart = Math.max(0, bestRefSplit - 15);
+          const searchEnd = Math.min(refTotal - 1, bestRefSplit + 15);
+          for (let ri = searchStart; ri <= searchEnd; ri++) {
+            if (refinedLines[ri].includes(targetSegText)) {
+              bestRefSplit = ri;
+              break;
+            }
           }
         }
 

@@ -1798,44 +1798,9 @@ export default function Home() {
         return { name, fullName: `${name}${role}` };
       });
 
-      // 要約文の各作品セクションに全参加者の見出しが存在することを100%保証する防護壁
+      // 要約結果の返却（機械的コピペ文の強制追記は廃止）
       const guaranteeSummary = (rawSummary: string): string => {
-        if (!rawSummary || !rawSummary.trim() || participants.length === 0) return rawSummary;
-        if (mode !== "yurupaka") return rawSummary;
-
-        let guaranteed = rawSummary.trim();
-        const numWorks = paintingCount > 0 ? Math.max(paintingCount, 2) : 2;
-        const kanjiNums = ["", "一", "二", "三", "四", "五"];
-
-        for (let wIdx = 1; wIdx <= numWorks; wIdx++) {
-          const nextIdx = wIdx + 1;
-          const wK = kanjiNums[wIdx] || String(wIdx);
-          const nK = kanjiNums[nextIdx] || String(nextIdx);
-
-          const startPat = `(?:#{1,4}\\s*【?(?:第\\s*[${wIdx}${wK}]\\s*枚目|第\\s*[${wIdx}${wK}]\\s*点目|[${wIdx}${wK}]\\s*枚目|作品\\s*[${wIdx}${wK}]|第\\s*[${wIdx}${wK}]\\s*作品))`;
-          const nextPat = `(?:#{1,4}\\s*【?(?:第\\s*[${nextIdx}${nK}]\\s*枚目|第\\s*[${nextIdx}${nK}]\\s*点目|[${nextIdx}${nK}]\\s*枚目|作品\\s*[${nextIdx}${nK}]|第\\s*[${nextIdx}${nK}]\\s*作品)|(?:#{1,4}\\s*)?【?(?:6つの感性|感性と対話|感性|観自在力|全体概要|今後のアクション|まとめ))`;
-
-          const secRegex = new RegExp(`(${startPat}[\\s\\S]*?)(?=\\n\\s*${nextPat}|\\n\\s*---+\\s*\\n\\s*(?:#{1,4}|【?6つの感性|【?感性|【?観自在力)|$)`, 'i');
-          const match = guaranteed.match(secRegex);
-          if (match) {
-            const secContent = match[1];
-            // その作品セクション内に名前が全く登場しない参加者を特定
-            const missing = participants.filter(p => {
-              const pName = p.name.trim();
-              if (!pName) return false;
-              return !secContent.includes(pName);
-            });
-
-            if (missing.length > 0) {
-              console.log(`[Frontend Guarantee] Work #${wIdx} missing participants:`, missing.map(m => m.name));
-              const additions = missing.map(p =>
-                `\n- #### 【${p.name}】の第${wIdx}枚目に対する発言・着眼点・解釈:\n  周囲の参加者の意見や感想に耳を傾け、頷きや相槌を交えながら作品の情景を静かに観察・鑑賞した。`
-              ).join('\n');
-              guaranteed = guaranteed.replace(secContent, secContent.trimEnd() + '\n' + additions + '\n\n');
-            }
-          }
-        }
-        return guaranteed;
+        return rawSummary ? rawSummary.trim() : "";
       };
 
       // 1. 最優先：Vercel の /api/summarize を呼び出し（サーバー環境変数 GEMINI_API_KEY またはクライアント入力キー）
@@ -1905,9 +1870,18 @@ export default function Home() {
             if (result.refinedText && result.refinedText.trim().length > 100) {
               const rLines = result.refinedText.split("\n").map((l: string) => l.trim()).filter((l: string) => l.length > 0);
               const rTotal = rLines.length;
-              let bestRSplit = Math.floor(rTotal * (splitIdx / total));
-              for (let ri = Math.max(1, Math.floor(rTotal * 0.20)); ri <= Math.min(rTotal - 1, Math.floor(rTotal * 0.85)); ri++) {
-                if (/(?:2|２|二)(?:枚目|点目)|次の(?:絵|作品|スライド)|画面を切り替え/.test(rLines[ri])) { bestRSplit = ri; break; }
+              // ユーザーが画面で指定した splitIdx に正確に同期して推敲文を分割（序盤での誤爆を完全防止）
+              let bestRSplit = Math.max(1, Math.min(rTotal - 1, Math.round(rTotal * (splitIdx / total))));
+              const targetSegText = (result.segments[splitIdx]?.text || "").trim().slice(0, 15);
+              if (targetSegText.length >= 4) {
+                const searchStart = Math.max(0, bestRSplit - 15);
+                const searchEnd = Math.min(rTotal - 1, bestRSplit + 15);
+                for (let ri = searchStart; ri <= searchEnd; ri++) {
+                  if (rLines[ri].includes(targetSegText)) {
+                    bestRSplit = ri;
+                    break;
+                  }
+                }
               }
               conversationBlocks = (
                 `【★第1枚目の絵画に関する対話テキスト（推敲済み：全 ${bestRSplit} 行）】\n` +
