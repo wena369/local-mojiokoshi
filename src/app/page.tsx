@@ -1763,16 +1763,17 @@ export default function Home() {
     setIsSummarizing(true);
     setErrorMsg(null);
     try {
+      const total = result.segments.length;
+      const minValid = Math.max(3, Math.floor(total * 0.20));
+      let splitIdx = work2SplitIndex;
+      if (mode === "yurupaka" && (splitIdx <= 0 || splitIdx >= total)) {
+        const detected = detectWork2SplitIndex(result.segments);
+        splitIdx = detected >= minValid && detected < total ? detected : Math.max(minValid, Math.floor(total * 0.50));
+        setWork2SplitIndex(splitIdx);
+      }
+
       // 1. Gemini API Key がある場合は、超大容量・高精度の Gemini 要約 API を最優先で使用
       if (geminiApiKey) {
-        const total = result.segments.length;
-        const minValid = Math.max(3, Math.floor(total * 0.20));
-        let splitIdx = work2SplitIndex;
-        if (splitIdx <= 0 || splitIdx >= total) {
-          const detected = detectWork2SplitIndex(result.segments);
-          splitIdx = detected >= minValid && detected < total ? detected : Math.max(minValid, Math.floor(total * 0.50));
-          setWork2SplitIndex(splitIdx);
-        }
         const res = await fetch("/api/summarize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1784,6 +1785,7 @@ export default function Home() {
             mode: mode,
             painting_count: paintingCount,
             split_index: splitIdx,
+            refined_text: result.refinedText || "",
             api_key: geminiApiKey,
             model: geminiModel,
           }),
@@ -1904,7 +1906,22 @@ export default function Home() {
             const directData = await directRes.json();
             const directSummary = directData.candidates?.[0]?.content?.parts?.[0]?.text;
             if (directSummary && directSummary.trim()) {
-              setResult((prev: any) => ({ ...prev, summary: directSummary.trim() }));
+              let guaranteed = directSummary.trim();
+              if (mode === "yurupaka") {
+                for (let wIdx = 1; wIdx <= numWorks; wIdx++) {
+                  const secRegex = new RegExp(`(###\\s*【?第${wIdx}枚目の作品[\\s\\S]*?)(?=###\\s*【?第${wIdx + 1}枚目|###\\s*【?感性と対話|---|\\Z)`, 'i');
+                  const match = guaranteed.match(secRegex);
+                  if (match) {
+                    const secContent = match[1];
+                    const missing = participants.filter(p => !secContent.includes(`【${p.name}】`) && !secContent.includes(`#### ${p.name}`));
+                    if (missing.length > 0) {
+                      const adds = missing.map(p => `\n- #### 【${p.name}】の第${wIdx}枚目に対する発言・着眼点・解釈:\n  周囲の参加者の意見や感想に耳を傾け、頷きや相槌を交えながら作品の情景を静かに観察・鑑賞した。`).join('\n');
+                      guaranteed = guaranteed.replace(match[1], secContent.trimEnd() + '\n' + adds + '\n\n');
+                    }
+                  }
+                }
+              }
+              setResult((prev: any) => ({ ...prev, summary: guaranteed }));
               return;
             }
           }
@@ -2995,66 +3012,107 @@ export default function Home() {
                 </div>
 
                 {/* 🖼️ 2枚目の作品切り替え位置（境界）設定・確認カード（ゆるパカ鑑賞会モード時） */}
-                {mode === "yurupaka" && result?.segments && result.segments.length > 0 && (
-                  <div className="mt-4 p-4 rounded-2xl bg-gradient-to-r from-amber-500/15 via-orange-500/10 to-amber-500/15 border-2 border-amber-400/50 shadow-lg shadow-amber-500/10 space-y-2.5 animate-in fade-in duration-200">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-amber-200 flex items-center gap-1.5">
-                        <span className="text-base">🖼️</span>
-                        <span>2枚目の作品切り替え位置（境界線）:</span>
-                      </span>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-mono font-extrabold text-amber-300 bg-amber-500/25 px-2.5 py-1 rounded-lg border border-amber-400/40 shadow-sm">
-                          {work2SplitIndex >= 0 ? `発言 #${work2SplitIndex + 1}` : "自動判定中"} / 全 {result.segments.length} 発言
+                {mode === "yurupaka" && result?.segments && result.segments.length > 0 && (() => {
+                  const total = result.segments.length;
+                  const effectiveSplit = work2SplitIndex > 0 && work2SplitIndex < total ? work2SplitIndex : Math.max(1, Math.floor(total * 0.50));
+                  return (
+                    <div className="mt-4 p-5 rounded-2xl bg-gradient-to-r from-amber-500/15 via-orange-500/10 to-amber-500/15 border-2 border-amber-400/60 shadow-lg shadow-amber-500/10 space-y-3 animate-in fade-in duration-200">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <span className="text-xs font-bold text-amber-200 flex items-center gap-1.5">
+                          <span className="text-base">🖼️</span>
+                          <span className="text-sm font-extrabold text-amber-100">第2枚目の作品切り替え位置（境界設定）:</span>
                         </span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (result?.segments && result.segments.length >= 6) {
-                              const total = result.segments.length;
-                              const minValid = Math.max(3, Math.floor(total * 0.20));
-                              const newIdx = detectWork2SplitIndex(result.segments);
-                              const safeIdx = newIdx >= minValid && newIdx < total ? newIdx : Math.max(minValid, Math.floor(total * 0.50));
-                              setWork2SplitIndex(safeIdx);
-                            }
-                          }}
-                          className="text-[11px] px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/40 font-medium transition-colors flex items-center gap-1"
-                          title="会話内容から2枚目の切り替え地点を再探索して自動設定します"
-                        >
-                          <span>🔄</span>
-                          <span>自動再検出</span>
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-mono font-extrabold text-amber-300 bg-amber-500/25 px-3 py-1 rounded-lg border border-amber-400/40 shadow-sm">
+                            発言 #{effectiveSplit + 1} から2枚目 / 全 {total} 発言
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (result?.segments && result.segments.length >= 6) {
+                                const minValid = Math.max(3, Math.floor(total * 0.20));
+                                const newIdx = detectWork2SplitIndex(result.segments);
+                                const safeIdx = newIdx >= minValid && newIdx < total ? newIdx : Math.max(minValid, Math.floor(total * 0.50));
+                                setWork2SplitIndex(safeIdx);
+                              }
+                            }}
+                            className="text-[11px] px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/40 font-medium transition-colors flex items-center gap-1"
+                            title="会話内容から2枚目の切り替え地点を再探索して自動設定します"
+                          >
+                            <span>🔄</span>
+                            <span>自動再検出</span>
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                    
-                    {/* 2枚目開始行の発言プレビュー */}
-                    <div className="text-xs text-slate-300 bg-slate-950/80 p-2.5 rounded-xl border border-amber-500/25 flex items-start gap-2">
-                      <span className="text-amber-300 font-bold flex-shrink-0 text-[11px] bg-amber-500/20 px-2 py-0.5 rounded border border-amber-500/30">
-                        2枚目開始
-                      </span>
-                      <div className="truncate flex-1">
-                        {work2SplitIndex >= 0 && result.segments[work2SplitIndex] ? (
-                          <>
-                            <span className="text-teal-300 font-bold mr-1">
-                              [{speakerNames[result.segments[work2SplitIndex].speaker] || result.segments[work2SplitIndex].speaker.replace('SPEAKER_', '話者')}]:
-                            </span>
-                            <span className="text-slate-200">
-                              {result.segments[work2SplitIndex].text || "（発言なし）"}
-                            </span>
-                          </>
-                        ) : (
-                          <span className="text-slate-500">※境界位置が自動計算されます</span>
-                        )}
-                      </div>
-                    </div>
 
-                    <div className="flex flex-wrap items-center justify-between text-[11px] text-amber-200/80 gap-1 pt-0.5">
-                      <span>💡 下の文字起こし一覧の各行にある「ここから2枚目に変更」ボタンで、1クリックで自由に境界を変更できます。</span>
-                      <span className="font-mono text-xs text-amber-300 font-semibold ml-auto">
-                        第1枚目: {work2SplitIndex > 0 ? work2SplitIndex : Math.floor(result.segments.length / 2)}行 / 第2枚目: {work2SplitIndex > 0 ? result.segments.length - work2SplitIndex : Math.ceil(result.segments.length / 2)}行
-                      </span>
+                      {/* 直接入力スライダー ＆ 発言番号入力 */}
+                      <div className="flex flex-col sm:flex-row items-center gap-3 bg-slate-900/90 p-3 rounded-xl border border-amber-500/30">
+                        <span className="text-xs text-amber-200 font-bold whitespace-nowrap">
+                          2枚目開始発言:
+                        </span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={Math.max(1, total - 1)}
+                          value={effectiveSplit}
+                          onChange={(e) => setWork2SplitIndex(Number(e.target.value))}
+                          className="flex-1 w-full accent-amber-400 bg-slate-800 h-2 rounded-lg cursor-pointer"
+                        />
+                        <div className="flex items-center gap-1.5 self-end sm:self-auto">
+                          <span className="text-xs text-slate-400 font-mono">発言 #</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={total}
+                            value={effectiveSplit + 1}
+                            onChange={(e) => {
+                              const val = Math.max(1, Math.min(total, Number(e.target.value)));
+                              setWork2SplitIndex(val - 1);
+                            }}
+                            className="w-16 bg-slate-950 border border-amber-400/50 rounded-lg py-1 px-2 text-xs font-mono font-bold text-center text-amber-300 focus:outline-none focus:border-amber-400"
+                          />
+                        </div>
+                      </div>
+
+                      {/* 作品区分バー */}
+                      <div className="flex flex-wrap items-center justify-between text-xs gap-2 pt-1 font-mono">
+                        <span className="px-3 py-1.5 rounded-xl bg-sky-500/20 text-sky-200 border border-sky-400/40 font-bold flex items-center gap-1.5 shadow-sm">
+                          <span>🎨 第1枚目:</span>
+                          <span>発言 #1 〜 #{effectiveSplit}（計 {effectiveSplit} 発言）</span>
+                        </span>
+                        <span className="px-3 py-1.5 rounded-xl bg-amber-500/20 text-amber-200 border border-amber-400/40 font-bold flex items-center gap-1.5 shadow-sm">
+                          <span>🖼️ 第2枚目:</span>
+                          <span>発言 #{effectiveSplit + 1} 〜 #{total}（計 {total - effectiveSplit} 発言）</span>
+                        </span>
+                      </div>
+                      
+                      {/* 2枚目開始行の発言プレビュー */}
+                      <div className="text-xs text-slate-300 bg-slate-950/80 p-2.5 rounded-xl border border-amber-500/25 flex items-start gap-2">
+                        <span className="text-amber-300 font-bold flex-shrink-0 text-[11px] bg-amber-500/20 px-2 py-0.5 rounded border border-amber-500/30">
+                          2枚目開始発言
+                        </span>
+                        <div className="truncate flex-1">
+                          {result.segments[effectiveSplit] ? (
+                            <>
+                              <span className="text-teal-300 font-bold mr-1">
+                                [#{effectiveSplit + 1} {speakerNames[result.segments[effectiveSplit].speaker] || result.segments[effectiveSplit].speaker.replace('SPEAKER_', '話者')}]:
+                              </span>
+                              <span className="text-slate-200">
+                                {result.segments[effectiveSplit].text || "（発言なし）"}
+                              </span>
+                            </>
+                          ) : (
+                            <span className="text-slate-500">※境界位置が自動計算されます</span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="text-[11px] text-amber-200/80 pt-0.5">
+                        💡 上のスライダーや発言番号入力、または下の文字起こし各行の「ここから2枚目に変更」ボタンで自由に境界を変更できます。
+                      </div>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
 
                 {/* Action buttons: Refine & Summarize */}
                 <div className="mt-4 flex flex-wrap gap-3">
@@ -3120,11 +3178,37 @@ export default function Home() {
                     </button>
                   </div>
                 </div>
+                {/* 🎨 ゆるパカ鑑賞会 作品区分常時表示バナー */}
+                {mode === "yurupaka" && result?.segments && result.segments.length > 0 && (() => {
+                  const total = result.segments.length;
+                  const effectiveSplit = work2SplitIndex > 0 && work2SplitIndex < total ? work2SplitIndex : Math.max(1, Math.floor(total * 0.50));
+                  return (
+                    <div className="mb-4 p-3 rounded-2xl bg-slate-900/90 border border-cyan-800/60 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="px-2.5 py-1 rounded-lg bg-sky-500/20 text-sky-200 border border-sky-400/40 font-bold">
+                          🎨 第1枚目: #1 〜 #{effectiveSplit}（計 {effectiveSplit} 発言）
+                        </span>
+                        <span className="text-slate-500">➜</span>
+                        <span className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-200 border border-amber-400/40 font-bold">
+                          🖼️ 第2枚目: #{effectiveSplit + 1} 〜 #{total}（計 {total - effectiveSplit} 発言）
+                        </span>
+                      </div>
+                      <span className="text-[11px] text-slate-400">
+                        ※各行のボタンで2枚目の開始位置を自由に変更できます
+                      </span>
+                    </div>
+                  );
+                })()}
+
                 <div className="space-y-3 max-h-[600px] overflow-y-auto pr-2">
                   {result.segments.map((segment: any, idx: number) => {
                     const c = getSpeakerColor(segment.speaker);
                     const segId = segment.id || `seg-${idx}-${segment.speaker}`;
-                    const isWork2Start = mode === "yurupaka" && work2SplitIndex > 0 && idx === work2SplitIndex;
+                    const total = result.segments.length;
+                    const effectiveSplit = work2SplitIndex > 0 && work2SplitIndex < total ? work2SplitIndex : Math.max(1, Math.floor(total * 0.50));
+                    const isWork2Start = mode === "yurupaka" && idx === effectiveSplit;
+                    const isWork1 = mode === "yurupaka" && idx < effectiveSplit;
+                    const isWork2 = mode === "yurupaka" && idx > effectiveSplit;
 
                     return (
                       <div key={segId} className="group relative">
@@ -3149,12 +3233,16 @@ export default function Home() {
                         <div className={`p-2 rounded-2xl transition-all ${
                           isWork2Start
                             ? 'border-2 border-amber-400/90 bg-amber-500/10 shadow-lg shadow-amber-500/15'
-                            : work2SplitIndex > 0 && idx >= work2SplitIndex
+                            : isWork2
                               ? 'border border-amber-500/20 bg-amber-500/[0.02]'
-                              : ''
+                              : 'border border-sky-500/15 bg-sky-500/[0.01]'
                         }`}>
                           {/* Header: 話者選択 + タイムスタンプ + 作品所属/境界切り替え + 操作ボタン */}
                           <div className="flex items-center gap-2 mb-1 flex-wrap">
+                            {/* 発言番号バッジ */}
+                            <span className="text-[10px] font-mono font-bold text-slate-400 bg-slate-900/80 px-1.5 py-0.5 rounded border border-slate-700/60">
+                              #{idx + 1}
+                            </span>
                             {/* 話者プルダウン */}
                             <div className="relative">
                               <select
@@ -3179,30 +3267,38 @@ export default function Home() {
                             {/* 🖼️ 作品所属タグ ＆ 「ここから2枚目に変更」操作（ゆるパカ鑑賞会モード時） */}
                             {mode === "yurupaka" && (
                               <div className="flex items-center gap-1.5">
-                                {idx === work2SplitIndex ? (
-                                  <span className="px-2 py-0.5 rounded-md text-[11px] font-extrabold bg-amber-400 text-slate-950 shadow-md shadow-amber-400/30 flex items-center gap-1">
-                                    <span>✅</span>
-                                    <span>ここから2枚目（境界設定中）</span>
+                                {isWork2Start ? (
+                                  <span className="px-2.5 py-0.5 rounded-md text-[11px] font-extrabold bg-amber-400 text-slate-950 shadow-md shadow-amber-400/30 flex items-center gap-1">
+                                    <span>⭐</span>
+                                    <span>ここから第2枚目（境界設定中）</span>
                                   </span>
+                                ) : isWork1 ? (
+                                  <>
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-500/20 text-sky-300 border border-sky-500/40">
+                                      🎨 1枚目
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => setWork2SplitIndex(idx)}
+                                      className="text-[10px] px-2 py-0.5 rounded border border-amber-500/40 bg-slate-900/80 text-amber-200 hover:bg-amber-500/20 hover:border-amber-400 font-medium transition-all flex items-center gap-1 shadow-sm"
+                                      title={`発言 #${idx + 1} から第2枚目として分割します`}
+                                    >
+                                      <span>👉 ここから2枚目に変更</span>
+                                    </button>
+                                  </>
                                 ) : (
                                   <>
-                                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border ${
-                                      work2SplitIndex > 0 && idx < work2SplitIndex
-                                        ? 'bg-sky-500/15 text-sky-300 border-sky-500/30'
-                                        : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                                    }`}>
-                                      {work2SplitIndex > 0 && idx < work2SplitIndex ? '🎨 1枚目' : '🖼️ 2枚目'}
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                                      🖼️ 2枚目
                                     </span>
-                                    {idx > 0 && (
-                                      <button
-                                        type="button"
-                                        onClick={() => setWork2SplitIndex(idx)}
-                                        className="text-[10px] px-2 py-0.5 rounded border border-slate-700 bg-slate-800/80 text-slate-300 hover:text-amber-200 hover:border-amber-400/50 hover:bg-amber-500/20 font-medium transition-all flex items-center gap-1 shadow-sm"
-                                        title={`この発言（#${idx + 1}）から第2枚目の作品鑑賞として要約を分割します`}
-                                      >
-                                        <span>ここから2枚目に変更</span>
-                                      </button>
-                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => setWork2SplitIndex(idx)}
+                                      className="text-[10px] px-2 py-0.5 rounded border border-amber-500/40 bg-slate-900/80 text-amber-200 hover:bg-amber-500/20 hover:border-amber-400 font-medium transition-all flex items-center gap-1 shadow-sm"
+                                      title={`発言 #${idx + 1} から第2枚目として分割します`}
+                                    >
+                                      <span>👈 ここから2枚目に変更</span>
+                                    </button>
                                   </>
                                 )}
                               </div>

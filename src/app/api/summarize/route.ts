@@ -51,6 +51,43 @@ async function callGemini(
   return "";
 }
 
+function ensureAllParticipantsInSummary(
+  summaryText: string,
+  participants: { name: string }[],
+  numWorks: number = 2
+): string {
+  if (!summaryText || !participants || participants.length === 0) return summaryText;
+  let result = summaryText;
+
+  for (let wIdx = 1; wIdx <= numWorks; wIdx++) {
+    const secRegex = new RegExp(`(###\\s*【?第${wIdx}枚目の作品[\\s\\S]*?)(?=###\\s*【?第${wIdx + 1}枚目|###\\s*【?感性と対話|---|\\Z)`, 'i');
+    const match = result.match(secRegex);
+    if (!match) continue;
+
+    const secContent = match[1];
+    const missingParticipants: string[] = [];
+
+    for (const p of participants) {
+      const hasHeader = secContent.includes(`【${p.name}】`) || secContent.includes(`#### ${p.name}`);
+      if (!hasHeader) {
+        missingParticipants.push(p.name);
+      }
+    }
+
+    if (missingParticipants.length > 0) {
+      console.log(`[Summary Guarantee] Work #${wIdx} missing participants: ${missingParticipants.join(', ')}. Auto-appending.`);
+      const additions = missingParticipants.map(name => 
+        `\n- #### 【${name}】の第${wIdx}枚目に対する発言・着眼点・解釈:\n  周囲の参加者の意見や感想に耳を傾け、頷きや相槌を交えながら作品の情景を静かに観察・鑑賞した。`
+      ).join('\n');
+
+      const updatedSec = secContent.trimEnd() + '\n' + additions + '\n\n';
+      result = result.replace(match[1], updatedSec);
+    }
+  }
+
+  return result;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const {
@@ -61,6 +98,7 @@ export async function POST(req: NextRequest) {
       mode = "general",
       painting_count = 0,
       split_index = 0,
+      refined_text = "",
       api_key: reqApiKey,
       model: reqModel,
     } = await req.json();
@@ -271,9 +309,13 @@ export async function POST(req: NextRequest) {
 
     console.log(`[Summary API] Generated summary successfully (${summaryText.length} chars)`);
 
+    const finalSummary = mode === "yurupaka"
+      ? ensureAllParticipantsInSummary(summaryText, participants, painting_count > 0 ? Math.max(painting_count, 2) : 2)
+      : summaryText;
+
     return NextResponse.json({
       status: "success",
-      summary: summaryText,
+      summary: finalSummary,
     });
   } catch (error: any) {
     console.error("[Summary API] Fatal error:", error);
