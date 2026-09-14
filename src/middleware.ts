@@ -2,8 +2,8 @@ import { auth } from "@/auth";
 import { NextResponse } from "next/server";
 
 export default auth((req) => {
-  // Allow auth API routes
-  if (req.nextUrl.pathname.startsWith("/api/auth")) {
+  // Allow all API routes (summarize, transcribe, etc.)
+  if (req.nextUrl.pathname.startsWith("/api/")) {
     return NextResponse.next();
   }
 
