@@ -145,6 +145,11 @@ export async function POST(req: NextRequest) {
       splitIndexNum = bestIdx;
     }
 
+    // 安全の絶対保証：万が一 splitIndexNum が 0 のままの場合は、必ず中央値（50%）を強制適用！
+    if (mode === "yurupaka" && (splitIndexNum <= 0 || splitIndexNum >= segments.length) && segments.length > 1) {
+      splitIndexNum = Math.max(1, Math.floor(segments.length * 0.50));
+    }
+
     // 対話テキストの構築（境界に基づいて第1枚目と第2枚目を完全に物理分離）
     let conversationBlocks = "";
     if (mode === "yurupaka" && splitIndexNum > 0 && splitIndexNum < segments.length) {
