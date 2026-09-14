@@ -938,7 +938,7 @@ export default function Home() {
     checkBackendServers();
   }, [resumePendingJob, checkBackendServers]);
 
-  // 🖼️ セグメントが読み込まれた時に2枚目の境界を自動設定（未設定時・または不正値の時に自動検出）
+  // 🖼️ セグメントが読み込まれた時に2枚目の境界を自動設定（未設定 -1 の時のみ自動検出・ユーザーの手動指定を絶対に巻き戻さない）
   useEffect(() => {
     // 音声認識の処理中（ポーリング中）はセグメントが断片的なため自動検出しない
     if (isProcessing) return;
@@ -947,8 +947,8 @@ export default function Home() {
       const total = result.segments.length;
       const minValid = Math.max(3, Math.floor(total * 0.20));
 
-      // 未設定（<= 0）または異常に手前（minValid未満、例えば1や2など）または範囲外の場合に再検出
-      if (work2SplitIndex < minValid || work2SplitIndex >= total) {
+      // 未設定（-1）または範囲外（>= total）の場合にのみ初期設定
+      if (work2SplitIndex === -1 || work2SplitIndex >= total) {
         const detected = detectWork2SplitIndex(result.segments);
         const safeSplit = detected >= minValid && detected < total ? detected : Math.max(minValid, Math.floor(total * 0.50));
         setWork2SplitIndex(safeSplit);
@@ -1311,6 +1311,7 @@ export default function Home() {
       setFile(selectedFile);
       setJobFileName(selectedFile.name);
       setResult(null);
+      setWork2SplitIndex(-1);
       setErrorMsg(null);
       setProgress({ step: "", percent: 0 });
       try { localStorage.removeItem(LS_JOB_KEY); } catch {}
@@ -1361,6 +1362,7 @@ export default function Home() {
     setIsProcessing(true);
     setErrorMsg(null);
     setResult(null);
+    setWork2SplitIndex(-1);
 
     // ---- Gemini サーバーサイド超高速モード（Vercel完結・PC起動不要！） ----
     if (sttEngine === "gemini") {
@@ -1766,7 +1768,7 @@ export default function Home() {
         const total = result.segments.length;
         const minValid = Math.max(3, Math.floor(total * 0.20));
         let splitIdx = work2SplitIndex;
-        if (splitIdx < minValid || splitIdx >= total) {
+        if (splitIdx <= 0 || splitIdx >= total) {
           const detected = detectWork2SplitIndex(result.segments);
           splitIdx = detected >= minValid && detected < total ? detected : Math.max(minValid, Math.floor(total * 0.50));
           setWork2SplitIndex(splitIdx);
@@ -3045,7 +3047,7 @@ export default function Home() {
                     </div>
 
                     <div className="flex flex-wrap items-center justify-between text-[11px] text-amber-200/80 gap-1 pt-0.5">
-                      <span>💡 下の文字起こし一覧の各行にある「🖼️ ここから2枚目」ボタンで、1クリックで自由に変更できます。</span>
+                      <span>💡 下の文字起こし一覧の各行にある「ここから2枚目に変更」ボタンで、1クリックで自由に境界を変更できます。</span>
                       <span className="font-mono text-xs text-amber-300 font-semibold ml-auto">
                         第1枚目: {work2SplitIndex > 0 ? work2SplitIndex : Math.floor(result.segments.length / 2)}行 / 第2枚目: {work2SplitIndex > 0 ? result.segments.length - work2SplitIndex : Math.ceil(result.segments.length / 2)}行
                       </span>
@@ -3143,8 +3145,14 @@ export default function Home() {
                           </div>
                         )}
 
-                        <div className={`p-1.5 rounded-2xl transition-all ${isWork2Start ? 'border-2 border-amber-400/50 bg-amber-500/5' : ''}`}>
-                          {/* Header: 話者選択 + タイムスタンプ + 「ここから2枚目」ボタン + 操作ボタン */}
+                        <div className={`p-2 rounded-2xl transition-all ${
+                          isWork2Start
+                            ? 'border-2 border-amber-400/90 bg-amber-500/10 shadow-lg shadow-amber-500/15'
+                            : work2SplitIndex > 0 && idx >= work2SplitIndex
+                              ? 'border border-amber-500/20 bg-amber-500/[0.02]'
+                              : ''
+                        }`}>
+                          {/* Header: 話者選択 + タイムスタンプ + 作品所属/境界切り替え + 操作ボタン */}
                           <div className="flex items-center gap-2 mb-1 flex-wrap">
                             {/* 話者プルダウン */}
                             <div className="relative">
@@ -3167,21 +3175,36 @@ export default function Home() {
                               {formatTime(segment.start)} - {formatTime(segment.end)}
                             </span>
 
-                            {/* 🖼️ 「ここから2枚目」指定ボタン（ゆるパカ鑑賞会モード時、2行目以降のみ） */}
-                            {mode === "yurupaka" && idx > 0 && (
-                              <button
-                                type="button"
-                                onClick={() => setWork2SplitIndex(idx)}
-                                className={`px-2 py-0.5 rounded-md text-[11px] font-medium flex items-center gap-1 transition-all ${
-                                  idx === work2SplitIndex
-                                    ? 'bg-amber-400 text-slate-950 font-bold shadow-md shadow-amber-400/30'
-                                    : 'text-amber-300/80 hover:text-amber-100 hover:bg-amber-500/20 border border-amber-500/30 bg-amber-500/10'
-                                }`}
-                                title="この発言から2枚目の絵画鑑賞として要約を分割します"
-                              >
-                                <span>🖼️</span>
-                                <span>{idx === work2SplitIndex ? '✅ 2枚目開始位置' : 'ここから2枚目'}</span>
-                              </button>
+                            {/* 🖼️ 作品所属タグ ＆ 「ここから2枚目に変更」操作（ゆるパカ鑑賞会モード時） */}
+                            {mode === "yurupaka" && (
+                              <div className="flex items-center gap-1.5">
+                                {idx === work2SplitIndex ? (
+                                  <span className="px-2 py-0.5 rounded-md text-[11px] font-extrabold bg-amber-400 text-slate-950 shadow-md shadow-amber-400/30 flex items-center gap-1">
+                                    <span>✅</span>
+                                    <span>ここから2枚目（境界設定中）</span>
+                                  </span>
+                                ) : (
+                                  <>
+                                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border ${
+                                      work2SplitIndex > 0 && idx < work2SplitIndex
+                                        ? 'bg-sky-500/15 text-sky-300 border-sky-500/30'
+                                        : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                    }`}>
+                                      {work2SplitIndex > 0 && idx < work2SplitIndex ? '🎨 1枚目' : '🖼️ 2枚目'}
+                                    </span>
+                                    {idx > 0 && (
+                                      <button
+                                        type="button"
+                                        onClick={() => setWork2SplitIndex(idx)}
+                                        className="text-[10px] px-2 py-0.5 rounded border border-slate-700 bg-slate-800/80 text-slate-300 hover:text-amber-200 hover:border-amber-400/50 hover:bg-amber-500/20 font-medium transition-all flex items-center gap-1 shadow-sm"
+                                        title={`この発言（#${idx + 1}）から第2枚目の作品鑑賞として要約を分割します`}
+                                      >
+                                        <span>ここから2枚目に変更</span>
+                                      </button>
+                                    )}
+                                  </>
+                                )}
+                              </div>
                             )}
 
                             {/* 操作ボタン（ホバーで表示） */}

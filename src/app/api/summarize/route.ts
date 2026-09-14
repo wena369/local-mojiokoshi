@@ -102,8 +102,8 @@ export async function POST(req: NextRequest) {
     const minValid = Math.max(3, Math.floor(total * 0.20));
     let splitIndexNum = typeof split_index === 'number' ? split_index : 0;
 
-    // もし split_index が未指定、または異常値（序盤20%未満、1や2など）または範囲外の場合、中央付近から安全に自動検出
-    if (mode === "yurupaka" && (splitIndexNum < minValid || splitIndexNum >= total) && total >= 6) {
+    // もし split_index が未指定（<= 0）または先頭直後（<= 1）または範囲外の場合、中央付近から安全に自動検出
+    if (mode === "yurupaka" && (splitIndexNum <= 1 || splitIndexNum >= total) && total >= 6) {
       const minIdx = Math.max(3, Math.floor(total * 0.25));
       const maxIdx = Math.min(total - 2, Math.floor(total * 0.80));
       const centerIdx = Math.max(minIdx, Math.floor(total * 0.50));
@@ -146,9 +146,9 @@ export async function POST(req: NextRequest) {
       splitIndexNum = bestIdx >= minValid && bestIdx < total ? bestIdx : centerIdx;
     }
 
-    // 安全の絶対保証：万が一 splitIndexNum が minValid 未満のままの場合は、必ず中央値（50%）を強制適用！
-    if (mode === "yurupaka" && (splitIndexNum < minValid || splitIndexNum >= total) && total > 1) {
-      splitIndexNum = Math.max(minValid, Math.floor(total * 0.50));
+    // 安全の絶対保証：万が一 splitIndexNum が 1 以下のままの場合は、必ず中央値（50%）を強制適用！
+    if (mode === "yurupaka" && (splitIndexNum <= 1 || splitIndexNum >= total) && total > 1) {
+      splitIndexNum = Math.max(1, Math.floor(total * 0.50));
     }
 
     // 対話テキストの構築（境界に基づいて第1枚目と第2枚目を完全に物理分離）
