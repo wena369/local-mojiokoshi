@@ -60,17 +60,36 @@ function ensureAllParticipantsInSummary(
   let result = summaryText;
 
   for (let wIdx = 1; wIdx <= numWorks; wIdx++) {
-    const secRegex = new RegExp(`(###\\s*【?第${wIdx}枚目の作品[\\s\\S]*?)(?=###\\s*【?第${wIdx + 1}枚目|###\\s*【?感性と対話|---|\\Z)`, 'i');
-    const match = result.match(secRegex);
-    if (!match) continue;
+    // 第wIdx枚目の作品セクションを柔軟かつ頑健に検出（Markdownレベルや表記揺れを全網羅）
+    const nextIdx = wIdx + 1;
+    const kanjiNums = ["", "一", "二", "三", "四", "五"];
+    const wK = kanjiNums[wIdx] || String(wIdx);
+    const nK = kanjiNums[nextIdx] || String(nextIdx);
 
-    const secContent = match[1];
+    const startPat = `(?:#{1,4}\\s*【?(?:第\\s*[${wIdx}${wK}]\\s*枚目|第\\s*[${wIdx}${wK}]\\s*点目|[${wIdx}${wK}]\\s*枚目|作品\\s*[${wIdx}${wK}]|第\\s*[${wIdx}${wK}]\\s*作品))`;
+    const nextPat = `(?:#{1,4}\\s*【?(?:第\\s*[${nextIdx}${nK}]\\s*枚目|第\\s*[${nextIdx}${nK}]\\s*点目|[${nextIdx}${nK}]\\s*枚目|作品\\s*[${nextIdx}${nK}]|第\\s*[${nextIdx}${nK}]\\s*作品|感性と対話|全体概要|今後のアクション|まとめ))`;
+
+    const secRegex = new RegExp(`(${startPat}[\\s\\S]*?)(?=\\n\\s*${nextPat}|\\n\\s*---+\\s*\\n\\s*#{1,4}|$)`, 'i');
+    const match = result.match(secRegex);
+    if (!match) {
+      console.warn(`[Summary Guarantee] Section for work #${wIdx} not detected with primary regex. Trying broad fallback.`);
+      continue;
+    }
+
+    const fullMatchedSection = match[1];
     const missingParticipants: string[] = [];
 
     for (const p of participants) {
-      const hasHeader = secContent.includes(`【${p.name}】`) || secContent.includes(`#### ${p.name}`);
+      const pName = p.name.trim();
+      if (!pName) continue;
+      const hasHeader = fullMatchedSection.includes(`【${pName}】`) ||
+                        fullMatchedSection.includes(`#### ${pName}`) ||
+                        fullMatchedSection.includes(`### ${pName}`) ||
+                        fullMatchedSection.includes(`**${pName}**`) ||
+                        fullMatchedSection.includes(`- ${pName}：`) ||
+                        fullMatchedSection.includes(`- ${pName}:`);
       if (!hasHeader) {
-        missingParticipants.push(p.name);
+        missingParticipants.push(pName);
       }
     }
 
@@ -80,8 +99,8 @@ function ensureAllParticipantsInSummary(
         `\n- #### 【${name}】の第${wIdx}枚目に対する発言・着眼点・解釈:\n  周囲の参加者の意見や感想に耳を傾け、頷きや相槌を交えながら作品の情景を静かに観察・鑑賞した。`
       ).join('\n');
 
-      const updatedSec = secContent.trimEnd() + '\n' + additions + '\n\n';
-      result = result.replace(match[1], updatedSec);
+      const updatedSec = fullMatchedSection.trimEnd() + '\n' + additions + '\n\n';
+      result = result.replace(fullMatchedSection, updatedSec);
     }
   }
 
@@ -113,21 +132,53 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Gemini API Key が設定されていません" }, { status: 400 });
     }
 
-    const speakerMap = speaker_names || {};
-    const roleMap = speaker_roles || {};
+    const speakerMap: Record<string, string> = speaker_names || {};
+    const roleMap: Record<string, string> = speaker_roles || {};
 
-    // 登場する全話者IDを重複なく抽出（SILENCE等を除く）
-    const rawSpeakers = Array.from(new Set(
-      segments
-        .map((s: any) => s.speaker || "SPEAKER_00")
-        .filter((sp: string) => sp !== "SILENCE" && !sp.startsWith("SILENCE"))
-    )).sort() as string[];
+    // 1. 全参加者リストの完全マスタ統合（speaker_names, segments, refined_text の全登場人物を確実に網羅）
+    const allParticipantNames = new Set<string>();
 
-    // 各話者の表示名（参加者名）リストを作成
-    const participants = rawSpeakers.map((spId: string) => {
-      const name = speakerMap[spId] || spId.replace("SPEAKER_", "話者");
-      const role = roleMap[spId] ? `（${roleMap[spId]}）` : "";
-      return { spId, name, fullName: `${name}${role}` };
+    // speaker_names に登録された全名前
+    Object.values(speakerMap).forEach((name: string) => {
+      const clean = (name || "").trim();
+      if (clean && clean !== "SILENCE" && !clean.startsWith("SILENCE")) {
+        allParticipantNames.add(clean);
+      }
+    });
+
+    // segments に登場する話者
+    segments.forEach((s: any) => {
+      const spId = s.speaker || "SPEAKER_00";
+      if (spId && spId !== "SILENCE" && !spId.startsWith("SILENCE")) {
+        const name = speakerMap[spId] || spId.replace("SPEAKER_", "話者");
+        if (name.trim()) allParticipantNames.add(name.trim());
+      }
+    });
+
+    // refined_text に登場する [話者名]
+    if (refined_text) {
+      const refSpeakerMatches = refined_text.match(/\[([^\]]+)\]/g);
+      if (refSpeakerMatches) {
+        refSpeakerMatches.forEach((m: string) => {
+          const name = m.replace(/^\[|\]$/g, '').trim();
+          if (name && name !== "SILENCE" && !name.startsWith("SILENCE")) {
+            allParticipantNames.add(name);
+          }
+        });
+      }
+    }
+
+    // 参加者オブジェクトの作成
+    const participants = Array.from(allParticipantNames).map(name => {
+      // 役職があれば取得
+      let role = "";
+      for (const [spId, n] of Object.entries(speakerMap)) {
+        if (n === name && roleMap[spId]) {
+          role = `（${roleMap[spId]}）`;
+          break;
+        }
+      }
+      return { name, fullName: `${name}${role}` };
     });
 
     const participantListStr = participants.length > 0
@@ -189,33 +240,66 @@ export async function POST(req: NextRequest) {
       splitIndexNum = Math.max(1, Math.floor(total * 0.50));
     }
 
-    // 対話テキストの構築（境界に基づいて第1枚目と第2枚目を完全に物理分離）
+    // 2. 対話テキストの構築（推敲済みテキストがあれば最優先活用し、第1枚目と第2枚目を明確に物理分割）
     let conversationBlocks = "";
     if (mode === "yurupaka" && splitIndexNum > 0 && splitIndexNum < segments.length) {
-      const w1Text = segments.slice(0, splitIndexNum).map((s: any, idx: number) => {
-        const spId = s.speaker || "SPEAKER_00";
-        const name = speakerMap[spId] || spId.replace("SPEAKER_", "話者");
-        return `[#${idx + 1} ${name}] ${s.text || ""}`;
-      }).join("\n");
-      const w2Text = segments.slice(splitIndexNum).map((s: any, idx: number) => {
-        const spId = s.speaker || "SPEAKER_00";
-        const name = speakerMap[spId] || spId.replace("SPEAKER_", "話者");
-        return `[#${splitIndexNum + idx + 1} ${name}] ${s.text || ""}`;
-      }).join("\n");
+      // 推敲文（refined_text）が存在する場合は、推敲文を分割して最高精度の対話テキストを構築
+      if (refined_text && refined_text.trim().length > 100) {
+        const refinedLines = refined_text.split("\n").map((l: string) => l.trim()).filter((l: string) => l.length > 0);
+        const refTotal = refinedLines.length;
+        // 推敲文内での切り替え位置を探索
+        const minRefIdx = Math.max(1, Math.floor(refTotal * 0.20));
+        const maxRefIdx = Math.min(refTotal - 1, Math.floor(refTotal * 0.85));
+        let bestRefSplit = Math.floor(refTotal * (splitIndexNum / total)); // セグメント比率に基づく初期値
 
-      conversationBlocks = (
-        `【★第1枚目の絵画に関する対話テキスト（セッション開始・自己紹介〜第2枚目提示前まで：全 ${splitIndexNum} 発言）】\n` +
-        w1Text + "\n\n" +
-        `【★第2枚目の絵画に関する対話テキスト（第2枚目提示以降〜セッション終了まで：全 ${segments.length - splitIndexNum} 発言）】\n` +
-        w2Text
-      );
+        for (let ri = minRefIdx; ri <= maxRefIdx; ri++) {
+          const line = refinedLines[ri];
+          if (/(?:2|２|二)(?:枚目|点目)|次の(?:絵|作品|スライド|画像)|画面を切り替え/.test(line)) {
+            bestRefSplit = ri;
+            break;
+          }
+        }
+
+        const w1RefText = refinedLines.slice(0, bestRefSplit).join("\n");
+        const w2RefText = refinedLines.slice(bestRefSplit).join("\n");
+
+        conversationBlocks = (
+          `【★第1枚目の絵画に関する対話テキスト（推敲済み・セッション開始〜第2枚目提示前まで：計 ${bestRefSplit} 行）】\n` +
+          w1RefText + "\n\n" +
+          `【★第2枚目の絵画に関する対話テキスト（推敲済み・第2枚目提示以降〜セッション終了まで：計 ${refTotal - bestRefSplit} 行）】\n` +
+          w2RefText
+        );
+      } else {
+        // 未推敲の場合はセグメントから構築
+        const w1Text = segments.slice(0, splitIndexNum).map((s: any, idx: number) => {
+          const spId = s.speaker || "SPEAKER_00";
+          const name = speakerMap[spId] || spId.replace("SPEAKER_", "話者");
+          return `[#${idx + 1} ${name}] ${s.text || ""}`;
+        }).join("\n");
+        const w2Text = segments.slice(splitIndexNum).map((s: any, idx: number) => {
+          const spId = s.speaker || "SPEAKER_00";
+          const name = speakerMap[spId] || spId.replace("SPEAKER_", "話者");
+          return `[#${splitIndexNum + idx + 1} ${name}] ${s.text || ""}`;
+        }).join("\n");
+
+        conversationBlocks = (
+          `【★第1枚目の絵画に関する対話テキスト（セッション開始・自己紹介〜第2枚目提示前まで：全 ${splitIndexNum} 発言）】\n` +
+          w1Text + "\n\n" +
+          `【★第2枚目の絵画に関する対話テキスト（第2枚目提示以降〜セッション終了まで：全 ${segments.length - splitIndexNum} 発言）】\n` +
+          w2Text
+        );
+      }
     } else {
-      const transcriptLines = segments.map((s: any, idx: number) => {
-        const spId = s.speaker || "SPEAKER_00";
-        const name = speakerMap[spId] || spId.replace("SPEAKER_", "話者");
-        return `[#${idx + 1} ${name}] ${s.text || ""}`;
-      });
-      conversationBlocks = transcriptLines.join("\n");
+      if (refined_text && refined_text.trim().length > 50) {
+        conversationBlocks = refined_text.trim();
+      } else {
+        const transcriptLines = segments.map((s: any, idx: number) => {
+          const spId = s.speaker || "SPEAKER_00";
+          const name = speakerMap[spId] || spId.replace("SPEAKER_", "話者");
+          return `[#${idx + 1} ${name}] ${s.text || ""}`;
+        });
+        conversationBlocks = transcriptLines.join("\n");
+      }
     }
 
     let prompt = "";

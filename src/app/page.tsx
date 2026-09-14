@@ -1772,8 +1772,8 @@ export default function Home() {
         setWork2SplitIndex(splitIdx);
       }
 
-      // 1. Gemini API Key がある場合は、超大容量・高精度の Gemini 要約 API を最優先で使用
-      if (geminiApiKey) {
+      // 1. 最優先：Vercel の /api/summarize を呼び出し（サーバー環境変数 GEMINI_API_KEY またはクライアント入力キー）
+      try {
         const res = await fetch("/api/summarize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1797,21 +1797,42 @@ export default function Home() {
             setResult((prev: any) => ({ ...prev, summary: data.summary }));
             return;
           }
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          console.warn("[Summarize] Vercel API returned error:", errData);
         }
-        console.warn("[Summarize] Vercel API summarize failed or timed out. Falling back to direct browser Gemini API call...");
+      } catch (vercelApiErr) {
+        console.warn("[Summarize] Vercel API fetch failed or timed out:", vercelApiErr);
+      }
 
-        // 1.5. ブラウザから直接 Google Gemini API を実行（サーバーレス関数のタイムアウトを完全回避）
+      // 1.5. ブラウザから直接 Google Gemini API を実行（フロントに geminiApiKey がある場合の安全策）
+      if (geminiApiKey) {
         try {
-          const rawSpeakers = Array.from(new Set(
-            result.segments
-              .map((s: any) => s.speaker || "SPEAKER_00")
-              .filter((sp: string) => sp !== "SILENCE" && !sp.startsWith("SILENCE"))
-          )).sort() as string[];
+          console.log("[Summarize] Falling back to direct browser Gemini API call...");
+          // 全参加者リストの統合
+          const allPartNames = new Set<string>();
+          Object.values(speakerNames).forEach((n: string) => {
+            if (n && n.trim() && n !== "SILENCE") allPartNames.add(n.trim());
+          });
+          result.segments.forEach((s: any) => {
+            const spId = s.speaker || "SPEAKER_00";
+            const n = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
+            if (n && n.trim() && n !== "SILENCE") allPartNames.add(n.trim());
+          });
+          if (result.refinedText) {
+            const m = result.refinedText.match(/\[([^\]]+)\]/g);
+            if (m) m.forEach((x: string) => {
+              const cn = x.replace(/^\[|\]$/g, '').trim();
+              if (cn && cn !== "SILENCE") allPartNames.add(cn);
+            });
+          }
 
-          const participants = rawSpeakers.map((spId: string) => {
-            const name = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
-            const role = speakerRoles[spId] ? `（${speakerRoles[spId]}）` : "";
-            return { spId, name, fullName: `${name}${role}` };
+          const participants = Array.from(allPartNames).map(name => {
+            let role = "";
+            for (const [spId, n] of Object.entries(speakerNames)) {
+              if (n === name && speakerRoles[spId]) { role = `（${speakerRoles[spId]}）`; break; }
+            }
+            return { name, fullName: `${name}${role}` };
           });
 
           const participantListStr = participants.length > 0
@@ -1840,30 +1861,44 @@ export default function Home() {
 
           let conversationBlocks = "";
           if (mode === "yurupaka" && splitIdx > 0 && splitIdx < result.segments.length) {
-            const w1Text = result.segments.slice(0, splitIdx).map((s: any, idx: number) => {
-              const spId = s.speaker || "SPEAKER_00";
-              const name = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
-              return `[#${idx + 1} ${name}] ${s.text || ""}`;
-            }).join("\n");
-            const w2Text = result.segments.slice(splitIdx).map((s: any, idx: number) => {
-              const spId = s.speaker || "SPEAKER_00";
-              const name = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
-              return `[#${splitIdx + idx + 1} ${name}] ${s.text || ""}`;
-            }).join("\n");
+            if (result.refinedText && result.refinedText.trim().length > 100) {
+              const rLines = result.refinedText.split("\n").map((l: string) => l.trim()).filter((l: string) => l.length > 0);
+              const rTotal = rLines.length;
+              let bestRSplit = Math.floor(rTotal * (splitIdx / total));
+              for (let ri = Math.max(1, Math.floor(rTotal * 0.20)); ri <= Math.min(rTotal - 1, Math.floor(rTotal * 0.85)); ri++) {
+                if (/(?:2|２|二)(?:枚目|点目)|次の(?:絵|作品|スライド)|画面を切り替え/.test(rLines[ri])) { bestRSplit = ri; break; }
+              }
+              conversationBlocks = (
+                `【★第1枚目の絵画に関する対話テキスト（推敲済み：全 ${bestRSplit} 行）】\n` +
+                rLines.slice(0, bestRSplit).join("\n") + "\n\n" +
+                `【★第2枚目の絵画に関する対話テキスト（推敲済み：全 ${rTotal - bestRSplit} 行）】\n` +
+                rLines.slice(bestRSplit).join("\n")
+              );
+            } else {
+              const w1Text = result.segments.slice(0, splitIdx).map((s: any, idx: number) => {
+                const spId = s.speaker || "SPEAKER_00";
+                const name = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
+                return `[#${idx + 1} ${name}] ${s.text || ""}`;
+              }).join("\n");
+              const w2Text = result.segments.slice(splitIdx).map((s: any, idx: number) => {
+                const spId = s.speaker || "SPEAKER_00";
+                const name = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
+                return `[#${splitIdx + idx + 1} ${name}] ${s.text || ""}`;
+              }).join("\n");
 
-            conversationBlocks = (
-              `【★第1枚目の絵画に関する対話テキスト（セッション開始・自己紹介〜第2枚目提示前まで：全 ${splitIdx} 発言）】\n` +
-              w1Text + "\n\n" +
-              `【★第2枚目の絵画に関する対話テキスト（第2枚目提示以降〜セッション終了まで：全 ${result.segments.length - splitIdx} 発言）】\n` +
-              w2Text
-            );
+              conversationBlocks = (
+                `【★第1枚目の絵画に関する対話テキスト（全 ${splitIdx} 発言）】\n` +
+                w1Text + "\n\n" +
+                `【★第2枚目の絵画に関する対話テキスト（全 ${result.segments.length - splitIdx} 発言）】\n` +
+                w2Text
+              );
+            }
           } else {
-            const transcriptLines = result.segments.map((s: any, idx: number) => {
+            conversationBlocks = result.refinedText || result.segments.map((s: any, idx: number) => {
               const spId = s.speaker || "SPEAKER_00";
               const name = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
               return `[#${idx + 1} ${name}] ${s.text || ""}`;
-            });
-            conversationBlocks = transcriptLines.join("\n");
+            }).join("\n");
           }
 
           const clientPrompt = mode === "yurupaka" ? (
@@ -1872,17 +1907,15 @@ export default function Home() {
             `【参加者全員リスト（全 ${participants.length} 名）】\n` +
             participantListStr + "\n\n" +
             `【★最重要・絶対厳守ルール：第1枚目にも第2枚目にも、上記全参加者（全 ${participants.length} 名）の見出しを必ず1人残らず出力すること】\n` +
-            `1. 【第1枚目の作品】の欄には、必ず【★第1枚目の絵画に関する対話テキスト】を参照し、上記参加者リストの全 ${participants.length} 名（1番から ${participants.length} 番まで）それぞれの「- #### 【お名前】の第1枚目に対する発言・着眼点・解釈:」見出しを1人も削らず全員分出力してください。\n` +
-            `2. 【第2枚目の作品】の欄にも、必ず上記全 ${participants.length} 名それぞれの「- #### 【お名前】の第2枚目に対する発言・着眼点・解釈:」見出しを1人も削らず全員分出力してください。\n` +
-            `3. 【超重要・欠損防止保証】：特定の参加者が自己紹介でのみ話していたり、第1枚目で相槌や短い発言しかしていない場合でも、「発言がないから」と見出しを省略することは絶対に禁止します。その場合は「【お名前】第1枚目の鑑賞では、周囲の〇〇という意見に頷き同調する様子が見られた」「短く〜〜と印象を述べ、静かに作品を観察していた」のように、必ず見出しを残してその姿勢を文章化してください。\n` +
-            `4. 参加者全員（全 ${participants.length} 名）の見出しが揃っていない要約は不完全とみなされます。出力前に必ず全 ${participants.length} 名分の見出しが存在することをセルフチェックしてください。\n\n` +
+            `1. 【第1枚目の作品】の欄には、上記参加者リストの全 ${participants.length} 名それぞれの「- #### 【お名前】の第1枚目に対する発言・着眼点・解釈:」見出しを1人も削らず全員分出力してください。\n` +
+            `2. 【第2枚目の作品】の欄にも、上記全 ${participants.length} 名それぞれの「- #### 【お名前】の第2枚目に対する発言・着眼点・解釈:」見出しを1人も削らず全員分出力してください。\n` +
+            `3. 特定の参加者が第1枚目で発言が少ない場合でも見出しは絶対に省略せず、「周囲の意見に頷き同調していた」等と記述してください。\n\n` +
             "【構成】\n" +
-            "### 【全体概要】\nこの鑑賞会セッション全体の目的、雰囲気、全体の対話の流れ、全体を通して深まった共通テーマを詳細に記述。\n\n" +
+            "### 【全体概要】\n対話の流れと全体テーマを詳細に記述。\n\n" +
             "---\n\n" +
             worksSections + "\n\n" +
             "---\n\n" +
-            "### 【感性と対話の深まりの分析】\n参加者の発言から見られた感性的な広がり（観察力、連想力、共感力、多角的な視点など）や対話の深まりを詳細に分析。\n\n" +
-            "※前置きや思考プロセスは出力せず、マークダウン本文のみを出力してください。\n\n" +
+            "### 【感性と対話の深まりの分析】\n参加者の感性の広がりを詳細に分析。\n\n" +
             conversationBlocks
           ) : (
             "あなたは会議録作成のエキスパートAIです。全参加者の発言を漏らさず包括的会議録を作成してください。\n\n" +
@@ -1909,14 +1942,20 @@ export default function Home() {
               let guaranteed = directSummary.trim();
               if (mode === "yurupaka") {
                 for (let wIdx = 1; wIdx <= numWorks; wIdx++) {
-                  const secRegex = new RegExp(`(###\\s*【?第${wIdx}枚目の作品[\\s\\S]*?)(?=###\\s*【?第${wIdx + 1}枚目|###\\s*【?感性と対話|---|\\Z)`, 'i');
+                  const nextIdx = wIdx + 1;
+                  const kanjiNums = ["", "一", "二", "三", "四", "五"];
+                  const wK = kanjiNums[wIdx] || String(wIdx);
+                  const nK = kanjiNums[nextIdx] || String(nextIdx);
+                  const startPat = `(?:#{1,4}\\s*【?(?:第\\s*[${wIdx}${wK}]\\s*枚目|第\\s*[${wIdx}${wK}]\\s*点目|[${wIdx}${wK}]\\s*枚目|作品\\s*[${wIdx}${wK}]|第\\s*[${wIdx}${wK}]\\s*作品))`;
+                  const nextPat = `(?:#{1,4}\\s*【?(?:第\\s*[${nextIdx}${nK}]\\s*枚目|第\\s*[${nextIdx}${nK}]\\s*点目|[${nextIdx}${nK}]\\s*枚目|作品\\s*[${nextIdx}${nK}]|第\\s*[${nextIdx}${nK}]\\s*作品|感性と対話|全体概要|今後のアクション|まとめ))`;
+                  const secRegex = new RegExp(`(${startPat}[\\s\\S]*?)(?=\\n\\s*${nextPat}|\\n\\s*---+\\s*\\n\\s*#{1,4}|$)`, 'i');
                   const match = guaranteed.match(secRegex);
                   if (match) {
                     const secContent = match[1];
-                    const missing = participants.filter(p => !secContent.includes(`【${p.name}】`) && !secContent.includes(`#### ${p.name}`));
+                    const missing = participants.filter(p => !secContent.includes(`【${p.name}】`) && !secContent.includes(`#### ${p.name}`) && !secContent.includes(`**${p.name}**`));
                     if (missing.length > 0) {
                       const adds = missing.map(p => `\n- #### 【${p.name}】の第${wIdx}枚目に対する発言・着眼点・解釈:\n  周囲の参加者の意見や感想に耳を傾け、頷きや相槌を交えながら作品の情景を静かに観察・鑑賞した。`).join('\n');
-                      guaranteed = guaranteed.replace(match[1], secContent.trimEnd() + '\n' + adds + '\n\n');
+                      guaranteed = guaranteed.replace(secContent, secContent.trimEnd() + '\n' + adds + '\n\n');
                     }
                   }
                 }
@@ -1942,6 +1981,8 @@ export default function Home() {
           speaker_roles: speakerRoles,
           mode: mode,
           painting_count: paintingCount,
+          split_index: splitIdx,
+          refined_text: result.refinedText || "",
           api_key: geminiApiKey,
         }),
       });
