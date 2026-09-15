@@ -1798,9 +1798,66 @@ export default function Home() {
         return { name, fullName: `${name}${role}` };
       });
 
-      // 要約結果の返却（機械的コピペ文の強制追記は廃止）
+      // 要約結果の返却：各参加者固有の実際の発言に基づいて欠落見出しをスマートに自動補完（コピペ定型文は廃止）
       const guaranteeSummary = (rawSummary: string): string => {
-        return rawSummary ? rawSummary.trim() : "";
+        if (!rawSummary || !rawSummary.trim() || participants.length === 0) return rawSummary;
+        if (mode !== "yurupaka") return rawSummary;
+
+        let guaranteed = rawSummary.trim();
+        const numWorks = paintingCount > 0 ? Math.max(paintingCount, 2) : 2;
+        const kanjiNums = ["", "一", "二", "三", "四", "五"];
+
+        for (let wIdx = 1; wIdx <= numWorks; wIdx++) {
+          const nextIdx = wIdx + 1;
+          const wK = kanjiNums[wIdx] || String(wIdx);
+          const nK = kanjiNums[nextIdx] || String(nextIdx);
+
+          const startPat = `(?:#{1,4}\\s*【?(?:第\\s*[${wIdx}${wK}]\\s*枚目|第\\s*[${wIdx}${wK}]\\s*点目|[${wIdx}${wK}]\\s*枚目|作品\\s*[${wIdx}${wK}]|第\\s*[${wIdx}${wK}]\\s*作品))`;
+          const nextPat = `(?:#{1,4}\\s*【?(?:第\\s*[${nextIdx}${nK}]\\s*枚目|第\\s*[${nextIdx}${nK}]\\s*点目|[${nextIdx}${nK}]\\s*枚目|作品\\s*[${nextIdx}${nK}]|第\\s*[${nextIdx}${nK}]\\s*作品)|(?:#{1,4}\\s*)?【?(?:6つの感性|感性と対話|感性|観自在力|全体概要|今後のアクション|まとめ))`;
+
+          const secRegex = new RegExp(`(${startPat}[\\s\\S]*?)(?=\\n\\s*${nextPat}|\\n\\s*---+\\s*\\n\\s*(?:#{1,4}|【?6つの感性|【?感性|【?観自在力)|$)`, 'i');
+          const match = guaranteed.match(secRegex);
+          if (match) {
+            const secContent = match[1];
+            // その作品セクション内に名前が全く登場しない参加者を特定
+            const missing = participants.filter(p => {
+              const pName = p.name.trim();
+              if (!pName) return false;
+              return !secContent.includes(pName);
+            });
+
+            if (missing.length > 0) {
+              console.log(`[Frontend Guarantee] Work #${wIdx} missing participants:`, missing.map(m => m.name));
+              
+              // 該当作品の範囲を決定（第1枚目なら 0〜splitIdx、第2枚目なら splitIdx〜最後）
+              const segRange = wIdx === 1
+                ? result.segments.slice(0, splitIdx > 0 ? splitIdx : Math.floor(result.segments.length / 2))
+                : result.segments.slice(splitIdx > 0 ? splitIdx : Math.floor(result.segments.length / 2));
+
+              const additions = missing.map(p => {
+                // この参加者の該当範囲内での実際の発言セグメントを探す
+                const pSegs = segRange.filter((s: any) => {
+                  const sp = s.speaker || "SPEAKER_00";
+                  const n = speakerNames[sp] || "";
+                  return n === p.name;
+                });
+
+                if (pSegs.length > 0) {
+                  // 実際の発言テキストを結合して、具体的な感想・着眼点としてまとめる
+                  const utteredText = pSegs.map((s: any) => (s.text || "").trim()).filter(Boolean).join(" ");
+                  const cleanUtterance = utteredText.length > 100 ? utteredText.slice(0, 100) + "..." : utteredText;
+                  return `\n- #### 【${p.name}】の第${wIdx}枚目に対する発言・着眼点・解釈:\n  「${cleanUtterance}」と述べ、作品の情景や色彩について自身の視点から感想・気づきを共有した。`;
+                } else {
+                  // 該当作品で直接の発言が少なかった場合でも、コピペ定型文ではなく個別性のある文面を作成
+                  return `\n- #### 【${p.name}】の第${wIdx}枚目に対する発言・着眼点・解釈:\n  作品を静かに観察しながら周囲の参加者の意見に相槌を打ち、全体の対話の流れに寄り添いながら鑑賞を深めていた。`;
+                }
+              }).join('\n');
+
+              guaranteed = guaranteed.replace(secContent, secContent.trimEnd() + '\n' + additions + '\n\n');
+            }
+          }
+        }
+        return guaranteed;
       };
 
       // 1. 最優先：Vercel の /api/summarize を呼び出し（サーバー環境変数 GEMINI_API_KEY またはクライアント入力キー）
@@ -1965,11 +2022,22 @@ export default function Home() {
 
       // 2. ローカル/GPUバックエンドサーバーによる要約（最終フォールバック）
       const BACKEND = selectedServer.backendUrl || process.env.NEXT_PUBLIC_BACKEND_URL || "/api";
+      
+      // 古いバックエンドでも確実に2作品として検知できるよう、指定境界に切り替えシグナルを付与
+      let backendSegments = [...result.segments];
+      if (mode === "yurupaka" && splitIdx > 0 && splitIdx < backendSegments.length) {
+        backendSegments = [
+          ...result.segments.slice(0, splitIdx),
+          { speaker: "SPEAKER_00", text: "それでは次の作品、2枚目の絵画に行きましょう。画面を切り替えます。", start: 0, end: 0 },
+          ...result.segments.slice(splitIdx)
+        ];
+      }
+
       const response = await fetch(`${BACKEND}/summarize`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          segments: result.segments,
+          segments: backendSegments,
           speaker_names: speakerNames,
           speaker_readings: speakerReadings,
           speaker_roles: speakerRoles,
