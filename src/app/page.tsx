@@ -219,8 +219,8 @@ async function sliceAudioFileToWav(file: File, startSec: number, endSec: number)
   const endSample = Math.min(decoded.length, Math.floor(endSec * srcRate));
   const lengthSamples = Math.max(1, endSample - startSample);
 
-  // 16kHz モノラル（Gemini 3.5 Transcribeに最適化）にリサンプリング
-  const targetRate = 16000;
+  // 24kHz モノラル（人間の子音・母音の明瞭度を最大化し、Gemini 3.5の認識精度を高める）
+  const targetRate = 24000;
   const targetLength = Math.ceil(lengthSamples * (targetRate / srcRate));
   const offlineCtx = new OfflineAudioContext(1, targetLength, targetRate);
 

@@ -219,41 +219,126 @@ export async function POST(req: NextRequest) {
 
     let usedModel = activeModel;
 
-    // A. 音声特化モデル（gemini-3.5-transcribe）の場合: 公式専用APIで実行
+    // 対話スクリプト形式 ➔ セグメント配列へ変換する共通高精度パーサー
+    const parseDialogScriptToSegments = (rawText: string) => {
+      const segments: any[] = [];
+      const rawLines = rawText.split("\n").map((l: string) => l.trim()).filter((l: string) => l.length > 0);
+      let currentSpeaker = "SPEAKER_00";
+      let lastEnd = 0;
+
+      for (const line of rawLines) {
+        if (isMetaLine(line) && !line.includes("【") && !line.includes("話者")) {
+          continue;
+        }
+
+        let startSec = lastEnd;
+        let endSec = lastEnd;
+        let rawSpk = "";
+        let lineText = line;
+
+        // タイムスタンプの抽出: [00:00 - 00:05] や [00:00]
+        const timeMatch = lineText.match(/^\[\s*([0-9:]+(?:\.[0-9]+)?)\s*(?:[-–~〜]\s*([0-9:]+(?:\.[0-9]+)?))?\s*\]\s*(.*)$/);
+        if (timeMatch) {
+          startSec = parseTimestampSeconds(timeMatch[1]);
+          if (timeMatch[2]) {
+            endSec = parseTimestampSeconds(timeMatch[2]);
+          } else {
+            endSec = startSec + 2.0;
+          }
+          lineText = timeMatch[3] || "";
+        }
+
+        // 話者名の抽出: 【田中】や 田中:
+        const spkMatch = lineText.match(/^(?:【([^】]+)】|([^\s:：]{1,20})\s*[:：])\s*(.*)$/);
+        if (spkMatch) {
+          rawSpk = (spkMatch[1] || spkMatch[2]).trim();
+          lineText = spkMatch[3] ? spkMatch[3].trim() : "";
+        }
+
+        // 該当話者IDの決定
+        if (rawSpk) {
+          currentSpeaker = getSpeakerId(rawSpk);
+        }
+
+        lineText = lineText.trim();
+        if (!lineText) continue;
+
+        if (endSec <= startSec) {
+          // 文字数に応じた大まかな秒数推定（1秒あたり約6〜8文字）
+          endSec = startSec + Math.max(1.5, Math.min(10.0, lineText.length / 6));
+        }
+        lastEnd = endSec;
+
+        segments.push({
+          id: `seg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+          speaker: currentSpeaker,
+          text: lineText,
+          start: Math.round(startSec * 10) / 10,
+          end: Math.round(endSec * 10) / 10,
+        });
+      }
+
+      if (segments.length === 0 && rawText.trim()) {
+        segments.push({
+          id: `seg_${Date.now()}_0`,
+          speaker: "SPEAKER_00",
+          text: rawText.trim(),
+          start: 0,
+          end: 0,
+        });
+      }
+
+      return segments;
+    };
+
+    // A. 音声特化モデル（gemini-3.5-transcribe）の場合: 公式専用APIで最高精度実行
     if (activeModel.includes("transcribe")) {
       console.log(`[Gemini API] Requesting ${activeModel} via official generateContent audioTranscriptionConfig endpoint...`);
       const transcribeUrl = `https://generativelanguage.googleapis.com/v1beta/models/${activeModel}:generateContent?key=${apiKey}`;
 
-      // 💡 Google 公式制約への自動適応（下位モデルへのフォールバックは行わず、gemini-3.5-transcribe 内で最適化）
-      // パラメータ競合（wordTimestamp / diarization / custom_vocabulary の非互換 400 エラー）を自動回避
-      const configAttempts: Array<{ name: string; config: any }> = [
+      // 💡 精度最大化アプローチ:
+      // Google公式ドキュメントで「単語タイムスタンプ(wordTimestamp)を有効にすると全体の文字起こし精度が低下する」と明記されているため、
+      // LLMによる文脈推論（漢字変換・文脈理解）を100%発揮できる構成を最優先します。
+      const configAttempts: Array<{ name: string; config: any; includePrompt: boolean }> = [
         {
-          name: "フルスペック (diarization + wordTimestamp)",
+          name: "最高精度話者分離モード（プロンプト指示＋diarization）",
+          config: {
+            languageCodes: ["ja-JP"],
+            diarization: true,
+          },
+          includePrompt: true,
+        },
+        {
+          name: "最高精度話者分離モード（diarizationのみ）",
+          config: {
+            languageCodes: ["ja-JP"],
+            diarization: true,
+          },
+          includePrompt: false,
+        },
+        {
+          name: "スマートモード（SMART）",
+          config: {
+            languageCodes: ["ja-JP"],
+            mode: "SMART",
+          },
+          includePrompt: false,
+        },
+        {
+          name: "基本文字起こしモード（languageCodes）",
+          config: {
+            languageCodes: ["ja-JP"],
+          },
+          includePrompt: false,
+        },
+        {
+          name: "単語タイムスタンプ互換モード（wordTimestamp）",
           config: {
             languageCodes: ["ja-JP"],
             diarization: true,
             wordTimestamp: true,
-          }
-        },
-        {
-          name: "話者分離モード (diarization)",
-          config: {
-            languageCodes: ["ja-JP"],
-            diarization: true,
-          }
-        },
-        {
-          name: "単語タイムスタンプモード (wordTimestamp)",
-          config: {
-            languageCodes: ["ja-JP"],
-            wordTimestamp: true,
-          }
-        },
-        {
-          name: "基本文字起こしモード (languageCodes)",
-          config: {
-            languageCodes: ["ja-JP"],
-          }
+          },
+          includePrompt: false,
         }
       ];
 
@@ -263,17 +348,22 @@ export async function POST(req: NextRequest) {
 
       for (let attemptIdx = 0; attemptIdx < configAttempts.length; attemptIdx++) {
         const attempt = configAttempts[attemptIdx];
+        const partsList: any[] = [
+          {
+            fileData: {
+              fileUri: fileUri,
+              mimeType: mimeType,
+            }
+          }
+        ];
+        if (attempt.includePrompt) {
+          partsList.push({ text: promptText });
+        }
+
         const transcribeBody = {
           contents: [
             {
-              parts: [
-                {
-                  fileData: {
-                    fileUri: fileUri,
-                    mimeType: mimeType,
-                  }
-                }
-              ]
+              parts: partsList
             }
           ],
           generationConfig: {
@@ -303,7 +393,7 @@ export async function POST(req: NextRequest) {
 
         console.warn(`[Gemini API] ${activeModel} attempt ${attemptIdx + 1} (${attempt.name}) failed (${res.status}): ${lastErrorText}`);
 
-        // 400 エラー（incompatible など設定の不一致）の場合のみ、次の構成で即時リトライ
+        // 400 エラー（非互換設定・プロンプト非対応など）の場合、次の安全設定で即時リトライ
         if (res.status === 400 && attemptIdx < configAttempts.length - 1) {
           console.log(`[Gemini API] Retrying with compatible configuration within ${activeModel}...`);
           continue;
@@ -324,21 +414,53 @@ export async function POST(req: NextRequest) {
       const candidate = genData.candidates?.[0];
       const parts = candidate?.content?.parts || [];
 
+      // 1. 各パートから完成文章および構造化情報を抽出
+      const rawTextParts: string[] = [];
+      const structuredSegments: any[] = [];
       let allWords: Array<{ word: string; speaker: string; start: number; end: number }> = [];
-      let fallbackFullText = "";
 
       for (const part of parts) {
-        if (part.text) {
-          fallbackFullText += part.text + "\n";
+        if (part.text && part.text.trim()) {
+          rawTextParts.push(part.text.trim());
         }
+
         const at = part.audioTranscription;
         if (at) {
-          const speaker = at.speakerLabel || at.speaker || "";
-          if (Array.isArray(at.words)) {
+          const spkLabel = at.speakerLabel || at.speaker || "";
+          const spkId = getSpeakerId(spkLabel || "SPEAKER_00");
+
+          // at.text (完成された文脈推論日本語文章)
+          const atText = (at.text || "").trim();
+
+          // タイムスタンプの算出
+          let segStart = parseOffsetSeconds(at.startOffset || at.start_offset || 0);
+          let segEnd = parseOffsetSeconds(at.endOffset || at.end_offset || 0);
+
+          if (Array.isArray(at.words) && at.words.length > 0) {
+            const firstW = at.words[0];
+            const lastW = at.words[at.words.length - 1];
+            if (segStart === 0 && (firstW.startOffset || firstW.start_offset)) {
+              segStart = parseOffsetSeconds(firstW.startOffset || firstW.start_offset);
+            }
+            if (segEnd === 0 && (lastW.endOffset || lastW.end_offset)) {
+              segEnd = parseOffsetSeconds(lastW.endOffset || lastW.end_offset);
+            }
+          }
+
+          if (atText) {
+            structuredSegments.push({
+              id: `seg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+              speaker: spkId,
+              text: atText,
+              start: Math.round(segStart * 10) / 10,
+              end: Math.round(segEnd * 10) / 10,
+            });
+          } else if (Array.isArray(at.words) && at.words.length > 0) {
+            // at.text が存在しない場合のみ、単語単位の情報を保持（フォールバック用）
             for (const w of at.words) {
               allWords.push({
                 word: w.word || "",
-                speaker: speaker,
+                speaker: spkLabel,
                 start: parseOffsetSeconds(w.startOffset || w.start_offset || 0),
                 end: parseOffsetSeconds(w.endOffset || w.end_offset || 0),
               });
@@ -347,8 +469,21 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // 単語アノテーションが存在する場合、自然な会話セグメントに再構成
-      if (allWords.length > 0) {
+      const combinedRawText = rawTextParts.join("\n").trim();
+
+      // 判定優先度:
+      // ① 対話スクリプト形式の完成テキスト（プロンプト指示による最高精度文脈推論）
+      // ② audioTranscription の完成文章セグメント（at.text）
+      // ③ 単語トークンの結合（最後のフォールバック）
+      // ④ 単一プレーンテキスト
+      if (combinedRawText && (combinedRawText.includes("【") || /\[\s*[0-9:]+/.test(combinedRawText))) {
+        console.log(`[Gemini API] Parsed dialog script format from ${activeModel} full text output.`);
+        parsedSegments = parseDialogScriptToSegments(combinedRawText);
+      } else if (structuredSegments.length > 0) {
+        console.log(`[Gemini API] Extracted ${structuredSegments.length} structured segments from ${activeModel} audioTranscription.`);
+        parsedSegments = structuredSegments;
+      } else if (allWords.length > 0) {
+        console.log(`[Gemini API] Reconstructing segments from ${allWords.length} words (word timestamp fallback)...`);
         let curSpeaker = "";
         let curWords: string[] = [];
         let curStart = 0;
@@ -393,14 +528,8 @@ export async function POST(req: NextRequest) {
           }
         }
         flush();
-      } else if (fallbackFullText.trim()) {
-        parsedSegments.push({
-          id: `seg_${Date.now()}_0`,
-          speaker: "SPEAKER_00",
-          text: fallbackFullText.trim(),
-          start: 0,
-          end: 0,
-        });
+      } else if (combinedRawText) {
+        parsedSegments = parseDialogScriptToSegments(combinedRawText);
       }
 
       if (parsedSegments.length === 0) {
@@ -452,90 +581,8 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      // 対話スクリプト形式 ➔ セグメント配列へ変換
-      const rawLines = rawText.split("\n").map((l: string) => l.trim()).filter((l: string) => l.length > 0);
-      let currentSpeaker = "SPEAKER_00";
-      let lastEnd = 0;
-
-      for (const line of rawLines) {
-      // メタ行のスキップ
-      if (isMetaLine(line) && !line.includes("【") && !line.includes("話者")) {
-        continue;
-      }
-
-      // パターン1: [00:00 - 00:05] 【田中】発言内容
-      // パターン2: [00:00] 【田中】発言内容
-      // パターン3: 【田中】発言内容
-      // パターン4: 田中: 発言内容
-      let startSec = lastEnd;
-      let endSec = lastEnd;
-      let rawSpk = "";
-      let lineText = line;
-
-      // タイムスタンプの抽出
-      const timeMatch = lineText.match(/^\[\s*([0-9:]+(?:\.[0-9]+)?)\s*(?:[-–~〜]\s*([0-9:]+(?:\.[0-9]+)?))?\s*\]\s*(.*)$/);
-      if (timeMatch) {
-        startSec = parseTimestampSeconds(timeMatch[1]);
-        if (timeMatch[2]) {
-          endSec = parseTimestampSeconds(timeMatch[2]);
-        } else {
-          endSec = startSec + 2.0;
-        }
-        lineText = timeMatch[3] || "";
-      }
-
-      // 話者名の抽出
-      const spkMatch = lineText.match(/^(?:【([^】]+)】|([^\s:：]{1,20})\s*[:：])\s*(.*)$/);
-      if (spkMatch) {
-        rawSpk = (spkMatch[1] || spkMatch[2]).trim();
-        lineText = spkMatch[3] ? spkMatch[3].trim() : "";
-      }
-
-      // 該当話者IDの決定
-      if (rawSpk) {
-        if (!speakerMap[rawSpk]) {
-          if (/^SPEAKER_\d+$/i.test(rawSpk)) {
-            speakerMap[rawSpk] = rawSpk.toUpperCase();
-          } else {
-            const newId = `SPEAKER_${String(speakerCounter).padStart(2, "0")}`;
-            speakerMap[rawSpk] = newId;
-            speakerDisplayNameMap[newId] = rawSpk;
-            speakerCounter++;
-          }
-        }
-        currentSpeaker = speakerMap[rawSpk];
-      }
-
-      lineText = lineText.trim();
-      if (!lineText) continue;
-
-      if (endSec <= startSec) {
-        // 文字数に応じた大まかな秒数推定（1秒あたり約6〜8文字）
-        endSec = startSec + Math.max(1.5, Math.min(10.0, lineText.length / 6));
-      }
-      lastEnd = endSec;
-
-      const segId = `seg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-
-      parsedSegments.push({
-        id: segId,
-        speaker: currentSpeaker,
-        text: lineText,
-        start: Math.round(startSec * 10) / 10,
-        end: Math.round(endSec * 10) / 10,
-      });
+      parsedSegments = parseDialogScriptToSegments(rawText);
     }
-
-    if (parsedSegments.length === 0) {
-      parsedSegments.push({
-        id: `seg_${Date.now()}_0`,
-        speaker: "SPEAKER_00",
-        text: rawText.trim(),
-        start: 0,
-        end: 0,
-      });
-    }
-  }
 
     // 6. 辞書単語の確実な置換
     const normalized = parsedSegments.map((s: any) => {
