@@ -482,15 +482,7 @@ export default function Home() {
       return "";
     }
   });
-  const [geminiModel, setGeminiModel] = useState<string>(() => {
-    try {
-      const saved = localStorage.getItem(LS_GEMINI_MODEL_KEY);
-      if (saved && !saved.includes("2.5-flash") && !saved.includes("flash-lite")) return saved;
-      return "gemini-3.5-transcribe";
-    } catch {
-      return "gemini-3.5-transcribe";
-    }
-  });
+  const [geminiModel, setGeminiModel] = useState<string>("gemini-3.5-transcribe");
   const [deepgramApiKey, setDeepgramApiKey] = useState<string>(() => {
     try {
       return localStorage.getItem(LS_DEEPGRAM_KEY_KEY) || "";
@@ -915,13 +907,8 @@ export default function Home() {
       if (savedEngine) setSttEngine(savedEngine);
       const savedGeminiKey = localStorage.getItem(LS_GEMINI_KEY_KEY);
       if (savedGeminiKey) setGeminiApiKey(savedGeminiKey);
-      const savedGeminiModel = localStorage.getItem(LS_GEMINI_MODEL_KEY);
-      if (savedGeminiModel && !savedGeminiModel.includes("2.5-flash") && !savedGeminiModel.includes("flash-lite")) {
-        setGeminiModel(savedGeminiModel);
-      } else {
-        setGeminiModel("gemini-3.5-transcribe");
-        try { localStorage.setItem(LS_GEMINI_MODEL_KEY, "gemini-3.5-transcribe"); } catch {}
-      }
+      setGeminiModel("gemini-3.5-transcribe");
+      try { localStorage.setItem(LS_GEMINI_MODEL_KEY, "gemini-3.5-transcribe"); } catch {}
       const savedDgKey = localStorage.getItem(LS_DEEPGRAM_KEY_KEY);
       if (savedDgKey) setDeepgramApiKey(savedDgKey);
       const savedScKey = localStorage.getItem(LS_SCRIBE_KEY_KEY);
@@ -1412,7 +1399,7 @@ export default function Home() {
         geminiFormData.append("file_uri", fileUri);
         geminiFormData.append("mime_type", uploadedMime);
         geminiFormData.append("api_key", geminiApiKey.trim());
-        geminiFormData.append("gemini_model", geminiModel);
+        geminiFormData.append("gemini_model", "gemini-3.5-transcribe");
         
         // 🔒 プライバシー保護: 本名(realName)は外部APIに絶対に送信しない。
         // ニックネーム(nickname)のみを name としてサニタイズして送信。
@@ -3802,26 +3789,19 @@ export default function Home() {
 
                   <div className="space-y-1.5">
                     <label className="text-xs font-semibold text-blue-300 block">
-                      使用するGeminiモデル名
+                      使用モデル
                     </label>
-                    <input
-                      type="text"
-                      list="gemini-models-list"
-                      placeholder="gemini-3.5-transcribe"
-                      value={geminiModel}
-                      onChange={(e) => {
-                        setGeminiModel(e.target.value);
-                        try { localStorage.setItem(LS_GEMINI_MODEL_KEY, e.target.value); } catch {}
-                      }}
-                      className="w-full bg-slate-900 border border-blue-500/40 rounded-xl px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-400 font-mono"
-                    />
-                    <datalist id="gemini-models-list">
-                      <option value="gemini-3.5-transcribe">gemini-3.5-transcribe（Google公式 音声文字起こし専用モデル・話者分離＆タイムスタンプ最高精度・推奨）</option>
-                      <option value="gemini-3.8-flash">gemini-3.8-flash（Google最新フラッシュモデル）</option>
-                      <option value="gemini-2.5-pro">gemini-2.5-pro（Google最高峰・文脈推論No.1）</option>
-                      <option value="gemini-2.0-flash">gemini-2.0-flash（高速・安定）</option>
-                    </datalist>
-                    <p className="text-[11px] text-slate-400">※推奨: <code>gemini-3.5-transcribe</code>（音声文字起こし特化の最新モデル。下位バージョンへの自動フォールバックは行わず、失敗時は直接エラーが表示されます）</p>
+                    <div className="p-3 bg-slate-900 border border-blue-500/30 rounded-xl space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-bold text-blue-200">gemini-3.5-transcribe</span>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                          最新特化モデル（固定）
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400">
+                        Google公式の最新音声文字起こし専用モデル。高精度話者分離と単語タイムスタンプに対応しています。
+                      </p>
+                    </div>
                   </div>
                 </div>
               )}

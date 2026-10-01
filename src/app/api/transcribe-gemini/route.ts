@@ -120,13 +120,11 @@ export async function POST(req: NextRequest) {
     }
 
     // 2. 使用するGeminiモデルの決定
-    // gemini-3.5-transcribe 以外の旧モデルへの勝手なフォールバックは行わず、失敗時は直接エラーを返す
-    const requestedModel = (modelParam || "").replace("models/", "").trim();
-    const activeModel = requestedModel && !requestedModel.includes("2.5-flash") && !requestedModel.includes("flash-lite")
-      ? requestedModel
-      : "gemini-3.5-transcribe";
+    // ユーザー要望: gemini-3.5-transcribe より下位のモデルは一切使わない
+    // 旧モデル（gemini-2.5-flash等）が送信されてきた場合も含め、常に最新の gemini-3.5-transcribe を強制使用
+    const activeModel = "gemini-3.5-transcribe";
 
-    console.log(`[Gemini API] Transcribing exclusively with target model: ${activeModel}`);
+    console.log(`[Gemini API] Transcribing exclusively with official target model: ${activeModel}`);
 
     // 3. 専門用語・固有名詞辞書
     let customWordsList: any[] = [];
