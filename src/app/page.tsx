@@ -2,7 +2,7 @@
 
 import React, { useState, useRef, useMemo, useEffect, useCallback } from "react";
 import { useSession, signIn, signOut } from "next-auth/react";
-import { UploadCloud, FileAudio, CheckCircle2, Settings, Loader2, PlayCircle, FileText, Sparkles, Volume2, Copy, Download, Clock, AlertCircle, Users, BookOpen, Mail, Send, Server, Wifi, WifiOff, Save, FolderOpen, Trash2, CopyPlus, ChevronDown, Pencil, Plus, X } from "lucide-react";
+import { UploadCloud, FileAudio, CheckCircle2, Settings, Loader2, PlayCircle, FileText, Sparkles, Volume2, Copy, Download, Clock, AlertCircle, Users, BookOpen, Mail, Send, Server, Wifi, WifiOff, Save, FolderOpen, Trash2, CopyPlus, ChevronDown, Pencil, Plus, X, ShieldCheck, Lock } from "lucide-react";
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -516,15 +516,23 @@ export default function Home() {
       return false;
     }
   });
-  const [preRegisteredSpeakers, setPreRegisteredSpeakers] = useState<{ id: string; name: string; reading: string; role: string }[]>(() => {
+  const [preRegisteredSpeakers, setPreRegisteredSpeakers] = useState<{ id: string; nickname: string; realName: string; reading: string; role: string }[]>(() => {
     try {
       const saved = localStorage.getItem(LS_PRE_REG_SPEAKERS_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map((item: any) => ({
+            id: item.id || `pre_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            nickname: item.nickname || item.name || '',
+            realName: item.realName || '',
+            reading: item.reading || '',
+            role: item.role || '参加者',
+          }));
+        }
       }
     } catch {}
-    return [{ id: 'pre_1', name: '', reading: '', role: '参加者' }];
+    return [{ id: 'pre_1', nickname: '', realName: '', reading: '', role: '参加者' }];
   });
 
   // 事前登録設定の自動保存
@@ -582,7 +590,7 @@ export default function Home() {
   const addPreRegisteredSpeaker = useCallback(() => {
     setPreRegisteredSpeakers(prev => [
       ...prev,
-      { id: `pre_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`, name: '', reading: '', role: '参加者' }
+      { id: `pre_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`, nickname: '', realName: '', reading: '', role: '参加者' }
     ]);
   }, []);
 
@@ -590,7 +598,7 @@ export default function Home() {
     setPreRegisteredSpeakers(prev => prev.length > 1 ? prev.filter(s => s.id !== id) : prev);
   }, []);
 
-  const updatePreRegisteredSpeaker = useCallback((id: string, field: 'name' | 'reading' | 'role', value: string) => {
+  const updatePreRegisteredSpeaker = useCallback((id: string, field: 'nickname' | 'realName' | 'reading' | 'role', value: string) => {
     setPreRegisteredSpeakers(prev => prev.map(s => {
       if (s.id === id) {
         return { ...s, [field]: value };
@@ -1406,8 +1414,18 @@ export default function Home() {
         geminiFormData.append("api_key", geminiApiKey.trim());
         geminiFormData.append("gemini_model", geminiModel);
         
-        const preRegValid = usePreRegistration ? preRegisteredSpeakers.filter(s => s.name.trim()) : [];
-        geminiFormData.append("pre_registered_speakers_json", JSON.stringify(preRegValid));
+        // 🔒 プライバシー保護: 本名(realName)は外部APIに絶対に送信しない。
+        // ニックネーム(nickname)のみを name としてサニタイズして送信。
+        const apiPreReg = usePreRegistration
+          ? preRegisteredSpeakers
+              .filter(s => (s.nickname || "").trim())
+              .map(s => ({
+                name: s.nickname.trim(),
+                reading: s.reading?.trim() || "",
+                role: s.role || "参加者",
+              }))
+          : [];
+        geminiFormData.append("pre_registered_speakers_json", JSON.stringify(apiPreReg));
 
         const activeCustomWords = customWords.filter(w => w.enabled && w.term.trim());
         geminiFormData.append("custom_dictionary_json", JSON.stringify(activeCustomWords));
@@ -1452,28 +1470,39 @@ export default function Home() {
           setWork2SplitIndex(autoSplit >= minValid && autoSplit < total ? autoSplit : Math.max(minValid, Math.floor(total * 0.50)));
         }
 
-        // 事前登録話者およびサーバー判定話者名の完全マッピング
+        // 事前登録話者およびサーバー判定話者名の完全マッピング（本名とニックネームをローカルで安全に合成）
         if (data.speakerNames && Object.keys(data.speakerNames).length > 0) {
           setSpeakerNames(prev => ({ ...data.speakerNames, ...prev }));
         }
 
-        if (usePreRegistration && preRegValid.length > 0 && completedResult.segments.length > 0) {
+        if (usePreRegistration && preRegisteredSpeakers.length > 0 && completedResult.segments.length > 0) {
+          const validPreReg = preRegisteredSpeakers.filter(s => (s.nickname || "").trim() || (s.realName || "").trim());
           const seenSpeakers = Array.from(new Set(completedResult.segments.map((s: any) => s.speaker))).sort() as string[];
           const newNames: Record<string, string> = {};
           const newReadings: Record<string, string> = {};
           const newRoles: Record<string, string> = {};
+
+          const formatDisplayName = (sp: { nickname: string; realName: string }) => {
+            const n = (sp.nickname || "").trim();
+            const r = (sp.realName || "").trim();
+            if (n && r) return `${n} (${r})`;
+            return n || r;
+          };
+
           seenSpeakers.forEach((spId, idx) => {
-            // サーバー側で名前が設定されていればそれを活用、なければインデックス順にフォールバック
+            // サーバー側で名前（ニックネーム）が設定されていればそれを活用、なければインデックス順にフォールバック
             const serverName = data.speakerNames?.[spId];
-            const matchedPre = serverName ? preRegValid.find(p => p.name.trim() === serverName) : null;
+            const matchedPre = serverName
+              ? validPreReg.find(p => (p.nickname && p.nickname.trim() === serverName.trim()) || (p.realName && p.realName.trim() === serverName.trim()))
+              : null;
             if (matchedPre) {
-              newNames[spId] = matchedPre.name;
+              newNames[spId] = formatDisplayName(matchedPre);
               if (matchedPre.reading) newReadings[spId] = matchedPre.reading;
               if (matchedPre.role) newRoles[spId] = matchedPre.role;
-            } else if (idx < preRegValid.length) {
-              newNames[spId] = preRegValid[idx].name;
-              if (preRegValid[idx].reading) newReadings[spId] = preRegValid[idx].reading;
-              if (preRegValid[idx].role) newRoles[spId] = preRegValid[idx].role;
+            } else if (idx < validPreReg.length) {
+              newNames[spId] = formatDisplayName(validPreReg[idx]);
+              if (validPreReg[idx].reading) newReadings[spId] = validPreReg[idx].reading;
+              if (validPreReg[idx].role) newRoles[spId] = validPreReg[idx].role;
             }
           });
           setSpeakerNames(prev => ({ ...newNames, ...prev }));
@@ -1509,10 +1538,20 @@ export default function Home() {
     formData.append("api_key", currentApiKey);
     formData.append("gemini_model", geminiModel);
     
-    const preRegValid = usePreRegistration ? preRegisteredSpeakers.filter(s => s.name.trim()) : [];
-    const preRegStr = preRegValid.map(s => `${s.name}${s.reading ? `（${s.reading}）` : ''}${s.role ? ` [${s.role}]` : ''}`).join(', ');
+    // 🔒 プライバシー保護: 本名(realName)は外部サーバーに一切送信しない。
+    // ニックネーム(nickname)のみを name としてサニタイズして送信。
+    const apiPreReg = usePreRegistration
+      ? preRegisteredSpeakers
+          .filter(s => (s.nickname || "").trim())
+          .map(s => ({
+            name: s.nickname.trim(),
+            reading: s.reading?.trim() || "",
+            role: s.role || "参加者",
+          }))
+      : [];
+    const preRegStr = apiPreReg.map(s => `${s.name}${s.reading ? `（${s.reading}）` : ''}${s.role ? ` [${s.role}]` : ''}`).join(', ');
     formData.append("pre_registered_speakers", preRegStr);
-    formData.append("pre_registered_speakers_json", JSON.stringify(preRegValid));
+    formData.append("pre_registered_speakers_json", JSON.stringify(apiPreReg));
 
     const activeCustomWords = customWords.filter(w => w.enabled && w.term.trim());
     formData.append("custom_dictionary_json", JSON.stringify(activeCustomWords));
@@ -1616,17 +1655,26 @@ export default function Home() {
             setWork2SplitIndex(autoSplit >= minValid && autoSplit < total ? autoSplit : Math.max(minValid, Math.floor(total * 0.50)));
           }
           
-          // 事前登録話者の自動マッピング（SPEAKER_00, SPEAKER_01 ... へ割り当て）
-          if (usePreRegistration && preRegValid.length > 0 && completedResult.segments.length > 0) {
+          // 事前登録話者の自動マッピング（SPEAKER_00, SPEAKER_01 ... へ本名とニックネームをローカルで安全に合成して割り当て）
+          if (usePreRegistration && preRegisteredSpeakers.length > 0 && completedResult.segments.length > 0) {
+            const validPreReg = preRegisteredSpeakers.filter(s => (s.nickname || "").trim() || (s.realName || "").trim());
             const seenSpeakers = Array.from(new Set(completedResult.segments.map((s: any) => s.speaker))).sort() as string[];
             const newNames: Record<string, string> = {};
             const newReadings: Record<string, string> = {};
             const newRoles: Record<string, string> = {};
+
+            const formatDisplayName = (sp: { nickname: string; realName: string }) => {
+              const n = (sp.nickname || "").trim();
+              const r = (sp.realName || "").trim();
+              if (n && r) return `${n} (${r})`;
+              return n || r;
+            };
+
             seenSpeakers.forEach((spId, idx) => {
-              if (idx < preRegValid.length) {
-                newNames[spId] = preRegValid[idx].name;
-                if (preRegValid[idx].reading) newReadings[spId] = preRegValid[idx].reading;
-                if (preRegValid[idx].role) newRoles[spId] = preRegValid[idx].role;
+              if (idx < validPreReg.length) {
+                newNames[spId] = formatDisplayName(validPreReg[idx]);
+                if (validPreReg[idx].reading) newReadings[spId] = validPreReg[idx].reading;
+                if (validPreReg[idx].role) newRoles[spId] = validPreReg[idx].role;
               }
             });
             setSpeakerNames(prev => ({ ...newNames, ...prev }));
@@ -2376,8 +2424,20 @@ export default function Home() {
 
               {usePreRegistration && (
                 <div className="space-y-4 animate-in fade-in duration-200 pt-1">
+                  {/* 🔒 秘匿性・プライバシー安心バッジ */}
+                  <div className="flex items-start gap-2.5 p-3 rounded-2xl bg-emerald-950/40 border border-emerald-500/30 text-emerald-200 text-xs shadow-inner">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <div className="space-y-0.5">
+                      <span className="font-semibold text-emerald-300">プライバシー＆完全秘匿保護</span>
+                      <p className="text-emerald-400/90 leading-relaxed text-[11px]">
+                        <strong>本名</strong>はブラウザ端末内（ローカル）にのみ安全に保持され、Google Gemini等の外部APIには<strong>一切送信されません</strong>。
+                        ニックネーム入力だけでもご利用可能で、もし本名を入力しても、完了後に端末内でのみ安全に結合表示されます。
+                      </p>
+                    </div>
+                  </div>
+
                   <p className="text-xs text-slate-300 leading-relaxed">
-                    あらかじめ参加者名・読み・役割を登録しておくことで、AIが固有名詞や話者分離をより正確に認識します。
+                    あらかじめニックネーム・本名・役割を登録しておくことで、AI認識精度の向上と個人情報の保護を両立できます。
                   </p>
 
                   {/* 話者数目安セレクター */}
@@ -2412,18 +2472,39 @@ export default function Home() {
                   <div className="space-y-3">
                     {preRegisteredSpeakers.map((sp) => (
                       <div key={sp.id} className="flex flex-wrap md:flex-nowrap items-center gap-3 bg-slate-900/40 p-3 rounded-2xl border border-slate-700/50">
-                        <div className="flex-1 min-w-[150px]">
-                          <label className="block text-[11px] text-slate-400 font-medium mb-1">名前（漢字）</label>
+                        {/* ニックネーム（AI送信・単独OK） */}
+                        <div className="flex-1 min-w-[140px]">
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-[11px] text-purple-300 font-medium">ニックネーム / 呼び名</label>
+                            <span className="text-[9px] text-purple-400/80 bg-purple-500/10 px-1.5 py-0.5 rounded">AI送信OK</span>
+                          </div>
                           <input
                             type="text"
-                            list="speaker-name-suggestions"
-                            placeholder="例: 山田太郎"
-                            value={sp.name}
-                            onChange={(e) => updatePreRegisteredSpeaker(sp.id, 'name', e.target.value)}
+                            placeholder="例: たろう / 山田"
+                            value={sp.nickname}
+                            onChange={(e) => updatePreRegisteredSpeaker(sp.id, 'nickname', e.target.value)}
                             className="w-full bg-[#0c1929] border border-purple-500/30 rounded-xl py-2 px-3 text-sm text-purple-200 placeholder-slate-500 focus:outline-none focus:border-purple-400"
                           />
                         </div>
-                        <div className="flex-1 min-w-[130px]">
+                        {/* 本名（完全秘匿・API非送信・任意） */}
+                        <div className="flex-1 min-w-[140px]">
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-[11px] text-emerald-300 font-medium flex items-center gap-1">
+                              <Lock className="w-3 h-3 text-emerald-400" />
+                              本名（任意・完全秘匿）
+                            </label>
+                            <span className="text-[9px] text-emerald-400/80 bg-emerald-500/10 px-1.5 py-0.5 rounded">API非送信</span>
+                          </div>
+                          <input
+                            type="text"
+                            placeholder="例: 山田 太郎"
+                            value={sp.realName}
+                            onChange={(e) => updatePreRegisteredSpeaker(sp.id, 'realName', e.target.value)}
+                            className="w-full bg-[#0c1929] border border-emerald-500/30 rounded-xl py-2 px-3 text-sm text-emerald-200 placeholder-slate-500 focus:outline-none focus:border-emerald-400"
+                          />
+                        </div>
+                        {/* ふりがな（任意） */}
+                        <div className="w-full md:w-36">
                           <label className="block text-[11px] text-slate-400 font-medium mb-1">ふりがな（任意）</label>
                           <input
                             type="text"
@@ -2433,8 +2514,9 @@ export default function Home() {
                             className="w-full bg-[#0c1929] border border-purple-500/30 rounded-xl py-2 px-3 text-sm text-purple-200 placeholder-slate-500 focus:outline-none focus:border-purple-400"
                           />
                         </div>
-                        <div className="w-full md:w-40">
-                          <label className="block text-[11px] text-slate-400 font-medium mb-1">カテゴリ（役割）</label>
+                        {/* 役割 */}
+                        <div className="w-full md:w-32">
+                          <label className="block text-[11px] text-slate-400 font-medium mb-1">役割</label>
                           <select
                             value={sp.role}
                             onChange={(e) => updatePreRegisteredSpeaker(sp.id, 'role', e.target.value)}
