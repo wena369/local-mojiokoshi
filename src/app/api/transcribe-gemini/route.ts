@@ -101,13 +101,13 @@ export async function POST(req: NextRequest) {
       candidateModels.push(requestedModel);
     }
 
-    // 公式の安定かつ高精度な音声対応モデル
+    // 公式の安定かつ高精度な音声対応モデル（最新の 2.5 系を最優先）
     const primaryModels = [
-      "gemini-3.5-transcribe",
+      "gemini-2.5-flash",
+      "gemini-2.5-pro",
       "gemini-2.0-flash",
       "gemini-1.5-pro",
       "gemini-1.5-flash",
-      "gemini-2.0-flash-lite",
     ];
     for (const pm of primaryModels) {
       if (!candidateModels.includes(pm)) {
@@ -323,9 +323,9 @@ export async function POST(req: NextRequest) {
     // B. generateContent による文字起こし（Interactions API 未使用またはフォールバック時）
     if (parsedSegments.length === 0) {
       let rawText = "";
-      const fallbackModels = candidateModels.filter(m => m !== "gemini-3.5-transcribe");
-      if (!fallbackModels.includes("gemini-2.0-flash")) {
-        fallbackModels.unshift("gemini-2.0-flash");
+      const fallbackModels = candidateModels.filter(m => m !== "gemini-3.5-transcribe" && m !== "gemini-2.0-flash-lite");
+      if (!fallbackModels.includes("gemini-2.5-flash")) {
+        fallbackModels.unshift("gemini-2.5-flash");
       }
 
       for (const modelCandidate of fallbackModels) {

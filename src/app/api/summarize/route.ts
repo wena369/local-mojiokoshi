@@ -7,17 +7,19 @@ export const maxDuration = 60; // Max allowed on Hobby/Pro
 async function callGemini(
   apiKey: string,
   prompt: string,
-  preferredModel = "gemini-2.0-flash",
+  preferredModel = "gemini-2.5-flash",
   maxTokens = 8192,
   temperature = 0.2
 ): Promise<string> {
   const candidateModels = [
     preferredModel,
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
     "gemini-2.0-flash",
     "gemini-1.5-flash",
-    "gemini-2.0-flash-lite",
+    "gemini-1.5-pro",
   ];
-  const uniqueModels = Array.from(new Set(candidateModels));
+  const uniqueModels = Array.from(new Set(candidateModels.filter(m => !m.includes("transcribe") && !m.includes("flash-lite"))));
 
   for (const model of uniqueModels) {
     try {
