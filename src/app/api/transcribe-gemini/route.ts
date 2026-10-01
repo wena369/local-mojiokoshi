@@ -223,60 +223,104 @@ export async function POST(req: NextRequest) {
     if (activeModel.includes("transcribe")) {
       console.log(`[Gemini API] Requesting ${activeModel} via official generateContent audioTranscriptionConfig endpoint...`);
       const transcribeUrl = `https://generativelanguage.googleapis.com/v1beta/models/${activeModel}:generateContent?key=${apiKey}`;
-      const customVocab = customWordsList.map((w: any) => w.term?.trim()).filter(Boolean);
 
-      const transcribeBody: any = {
-        contents: [
-          {
-            parts: [
-              {
-                fileData: {
-                  fileUri: fileUri,
-                  mimeType: mimeType,
-                }
-              }
-            ]
-          }
-        ],
-        generationConfig: {
-          audioTranscriptionConfig: {
+      // 💡 Google 公式制約への自動適応（下位モデルへのフォールバックは行わず、gemini-3.5-transcribe 内で最適化）
+      // パラメータ競合（wordTimestamp / diarization / custom_vocabulary の非互換 400 エラー）を自動回避
+      const configAttempts: Array<{ name: string; config: any }> = [
+        {
+          name: "フルスペック (diarization + wordTimestamp)",
+          config: {
             languageCodes: ["ja-JP"],
             diarization: true,
             wordTimestamp: true,
-            mode: "VERBATIM",
+          }
+        },
+        {
+          name: "話者分離モード (diarization)",
+          config: {
+            languageCodes: ["ja-JP"],
+            diarization: true,
+          }
+        },
+        {
+          name: "単語タイムスタンプモード (wordTimestamp)",
+          config: {
+            languageCodes: ["ja-JP"],
+            wordTimestamp: true,
+          }
+        },
+        {
+          name: "基本文字起こしモード (languageCodes)",
+          config: {
+            languageCodes: ["ja-JP"],
           }
         }
-      };
+      ];
 
-      // 💡 Google Gemini API 公式制約:
-      // audioTranscriptionConfig では `wordTimestamp: true` と `customVocabulary` は併用不可（400エラー: custom_vocabulary is incompatible with word timestamps）。
-      // そのため API リクエスト側には customVocabulary を渡さず、取得後のセグメントに対しサーバー/クライアント側で確実にカスタム辞書置換を適用します。
+      let lastErrorText = "";
+      let lastStatus = 500;
+      let genData: any = null;
 
-      const transcribeRes = await fetch(transcribeUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(transcribeBody),
-      });
+      for (let attemptIdx = 0; attemptIdx < configAttempts.length; attemptIdx++) {
+        const attempt = configAttempts[attemptIdx];
+        const transcribeBody = {
+          contents: [
+            {
+              parts: [
+                {
+                  fileData: {
+                    fileUri: fileUri,
+                    mimeType: mimeType,
+                  }
+                }
+              ]
+            }
+          ],
+          generationConfig: {
+            audioTranscriptionConfig: attempt.config
+          }
+        };
 
-      if (!transcribeRes.ok) {
-        const errText = await transcribeRes.text();
-        let errMsg = errText;
+        const res = await fetch(transcribeUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(transcribeBody),
+        });
+
+        if (res.ok) {
+          genData = await res.json();
+          console.log(`[Gemini API] ${activeModel} succeeded with: ${attempt.name}`);
+          break;
+        }
+
+        const errText = await res.text();
+        lastErrorText = errText;
+        lastStatus = res.status;
         try {
           const errJson = JSON.parse(errText);
-          errMsg = errJson.error?.message || errText;
+          lastErrorText = errJson.error?.message || errText;
         } catch {}
-        console.error(`[Gemini API] ${activeModel} error (${transcribeRes.status}):`, errMsg);
 
-        // 下位モデルへのフォールバックは行わず、ユーザーへ直接エラーを通知
-        return NextResponse.json(
-          {
-            error: `【${activeModel} 呼び出しエラー (${transcribeRes.status})】\n${errMsg}\n\n※下位モデルへのフォールバックは行いません。APIキーの有効性やプロジェクトのモデル利用権限をご確認ください。`
-          },
-          { status: transcribeRes.status >= 400 && transcribeRes.status < 500 ? transcribeRes.status : 500 }
-        );
+        console.warn(`[Gemini API] ${activeModel} attempt ${attemptIdx + 1} (${attempt.name}) failed (${res.status}): ${lastErrorText}`);
+
+        // 400 エラー（incompatible など設定の不一致）の場合のみ、次の構成で即時リトライ
+        if (res.status === 400 && attemptIdx < configAttempts.length - 1) {
+          console.log(`[Gemini API] Retrying with compatible configuration within ${activeModel}...`);
+          continue;
+        }
+
+        // 401(キー無効)や404等の根本エラーは即座に停止
+        break;
       }
 
-      const genData = await transcribeRes.json();
+      if (!genData) {
+        return NextResponse.json(
+          {
+            error: `【${activeModel} 呼び出しエラー (${lastStatus})】\n${lastErrorText}\n\n※下位モデルへのフォールバックは行いません。APIキーの有効性やプロジェクトのモデル利用権限をご確認ください。`
+          },
+          { status: lastStatus >= 400 && lastStatus < 500 ? lastStatus : 500 }
+        );
+      }
       const candidate = genData.candidates?.[0];
       const parts = candidate?.content?.parts || [];
 
