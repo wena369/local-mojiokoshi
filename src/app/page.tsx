@@ -1477,6 +1477,9 @@ export default function Home() {
         const activeCustomWords = customWords.filter(w => w.enabled && w.term.trim());
         const customDictJson = JSON.stringify(activeCustomWords);
 
+        // サーバーから返された話者名マッピングを蓄積
+        const combinedSpeakerNames: Record<string, string> = {};
+
         // 1つのオーディオBlob（またはFile）を Google AI Studio 経由で文字起こしするヘルパー
         const transcribeOneChunk = async (
           blobToUpload: Blob,
@@ -1536,6 +1539,9 @@ export default function Home() {
           }
 
           const data = await res.json();
+          if (data.speakerNames && typeof data.speakerNames === "object") {
+            Object.assign(combinedSpeakerNames, data.speakerNames);
+          }
           return data.segments || [];
         };
 
@@ -1654,8 +1660,8 @@ export default function Home() {
         }
 
         // 事前登録話者およびサーバー判定話者名の完全マッピング（本名とニックネームをローカルで安全に合成）
-        if (data.speakerNames && Object.keys(data.speakerNames).length > 0) {
-          setSpeakerNames(prev => ({ ...data.speakerNames, ...prev }));
+        if (Object.keys(combinedSpeakerNames).length > 0) {
+          setSpeakerNames(prev => ({ ...combinedSpeakerNames, ...prev }));
         }
 
         if (usePreRegistration && preRegisteredSpeakers.length > 0 && completedResult.segments.length > 0) {
@@ -1674,7 +1680,7 @@ export default function Home() {
 
           seenSpeakers.forEach((spId, idx) => {
             // サーバー側で名前（ニックネーム）が設定されていればそれを活用、なければインデックス順にフォールバック
-            const serverName = data.speakerNames?.[spId];
+            const serverName = combinedSpeakerNames[spId];
             const matchedPre = serverName
               ? validPreReg.find(p => (p.nickname && p.nickname.trim() === serverName.trim()) || (p.realName && p.realName.trim() === serverName.trim()))
               : null;
