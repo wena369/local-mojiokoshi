@@ -3741,7 +3741,7 @@ export default function Home() {
                       <option value="gemini-1.5-pro">gemini-1.5-pro（長文音声・高推論）</option>
                       <option value="gemini-1.5-flash">gemini-1.5-flash（標準・安定）</option>
                     </datalist>
-                    <p className="text-[11px] text-slate-400">※推奨: <code>gemini-3.5-transcribe</code>（音声文字起こし特化の最新モデル）または <code>gemini-2.5-flash</code></p>
+                    <p className="text-[11px] text-slate-400">※推奨: <code>gemini-3.5-transcribe</code>（音声文字起こし特化の最新モデル。下位バージョンへの自動フォールバックは行わず、失敗時は直接エラーが表示されます）</p>
                   </div>
                 </div>
               )}

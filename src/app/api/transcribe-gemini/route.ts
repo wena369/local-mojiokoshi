@@ -118,61 +118,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "音声データ（file または file_uri）が指定されていません" }, { status: 400 });
     }
 
-    // 2. 利用可能なモデル一覧を Google API から動的に取得（404の根絶）
-    let availableModels: string[] = [];
-    try {
-      const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
-      if (listRes.ok) {
-        const listData = await listRes.json();
-        availableModels = (listData.models || [])
-          .filter((m: any) => m.supportedGenerationMethods?.includes("generateContent"))
-          .map((m: any) => m.name.replace("models/", ""));
-        console.log("[Gemini API] Dynamically discovered available models:", availableModels);
-      }
-    } catch (e) {
-      console.warn("[Gemini API] Failed to fetch ListModels:", e);
-    }
-
-    // 候補モデルリストの構築
+    // 2. 使用するGeminiモデルの決定
+    // gemini-3.5-transcribe 以外の旧モデルへの勝手なフォールバックは行わず、失敗時は直接エラーを返す
     const requestedModel = (modelParam || "").replace("models/", "").trim();
-    let candidateModels: string[] = [];
+    const activeModel = requestedModel && !requestedModel.includes("flash-lite")
+      ? requestedModel
+      : "gemini-3.5-transcribe";
 
-    // ユーザー指定モデル
-    if (requestedModel && !requestedModel.includes("flash-lite")) {
-      candidateModels.push(requestedModel);
-    } else {
-      candidateModels.push("gemini-3.5-transcribe");
-    }
-
-    // 推奨の現役モデル優先順
-    const preferredOrder = [
-      "gemini-3.5-transcribe",
-      "gemini-2.5-flash",
-      "gemini-2.5-pro",
-      "gemini-2.0-flash",
-      "gemini-1.5-pro",
-      "gemini-1.5-flash",
-    ];
-
-    if (availableModels.length > 0) {
-      // 実際に API に存在するモデルのみを優先順で追加
-      for (const pref of preferredOrder) {
-        if (availableModels.includes(pref) && !candidateModels.includes(pref)) {
-          candidateModels.push(pref);
-        }
-      }
-      // その他 Gemini モデル
-      for (const av of availableModels) {
-        if (!candidateModels.includes(av) && av.toLowerCase().includes("gemini") && !av.toLowerCase().includes("lite") && !av.toLowerCase().includes("8b")) {
-          candidateModels.push(av);
-        }
-      }
-    } else {
-      // ListModels が取得できなかった場合のフォールバック
-      for (const pref of preferredOrder) {
-        if (!candidateModels.includes(pref)) candidateModels.push(pref);
-      }
-    }
+    console.log(`[Gemini API] Transcribing exclusively with target model: ${activeModel}`);
 
     // 3. 専門用語・固有名詞辞書
     let customWordsList: any[] = [];
@@ -265,255 +218,192 @@ export async function POST(req: NextRequest) {
       return speakerMap[rawSpk];
     }
 
-    let usedModel = "";
-    let lastError = "";
+    let usedModel = activeModel;
 
-    // A. 最新公式音声特化モデル（gemini-3.5-transcribe）を公式 generateContent API で最優先実行
-    if (candidateModels.includes("gemini-3.5-transcribe")) {
-      try {
-        console.log("[Gemini API] Requesting Gemini 3.5 Transcribe via official generateContent endpoint...");
-        const transcribeUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-transcribe:generateContent?key=${apiKey}`;
-        const customVocab = customWordsList.map((w: any) => w.term?.trim()).filter(Boolean);
+    // A. 音声特化モデル（gemini-3.5-transcribe）の場合: 公式専用APIで実行
+    if (activeModel.includes("transcribe")) {
+      console.log(`[Gemini API] Requesting ${activeModel} via official generateContent audioTranscriptionConfig endpoint...`);
+      const transcribeUrl = `https://generativelanguage.googleapis.com/v1beta/models/${activeModel}:generateContent?key=${apiKey}`;
+      const customVocab = customWordsList.map((w: any) => w.term?.trim()).filter(Boolean);
 
-        const transcribeBody: any = {
-          contents: [
-            {
-              parts: [
-                {
-                  fileData: {
-                    fileUri: fileUri,
-                    mimeType: mimeType,
-                  }
+      const transcribeBody: any = {
+        contents: [
+          {
+            parts: [
+              {
+                fileData: {
+                  fileUri: fileUri,
+                  mimeType: mimeType,
                 }
-              ]
-            }
-          ],
-          generationConfig: {
-            audioTranscriptionConfig: {
-              languageCodes: ["ja-JP"],
-              diarization: true,
-              wordTimestamp: true,
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          audioTranscriptionConfig: {
+            languageCodes: ["ja-JP"],
+            diarization: true,
+            wordTimestamp: true,
+          }
+        }
+      };
+
+      if (customVocab.length > 0) {
+        transcribeBody.generationConfig.audioTranscriptionConfig.customVocabulary = customVocab;
+      }
+
+      const transcribeRes = await fetch(transcribeUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(transcribeBody),
+      });
+
+      if (!transcribeRes.ok) {
+        const errText = await transcribeRes.text();
+        let errMsg = errText;
+        try {
+          const errJson = JSON.parse(errText);
+          errMsg = errJson.error?.message || errText;
+        } catch {}
+        console.error(`[Gemini API] ${activeModel} error (${transcribeRes.status}):`, errMsg);
+
+        // 下位モデルへのフォールバックは行わず、ユーザーへ直接エラーを通知
+        return NextResponse.json(
+          {
+            error: `【${activeModel} 呼び出しエラー (${transcribeRes.status})】\n${errMsg}\n\n※下位モデルへのフォールバックは行いません。APIキーの有効性やプロジェクトのモデル利用権限をご確認ください。`
+          },
+          { status: transcribeRes.status >= 400 && transcribeRes.status < 500 ? transcribeRes.status : 500 }
+        );
+      }
+
+      const genData = await transcribeRes.json();
+      const candidate = genData.candidates?.[0];
+      const parts = candidate?.content?.parts || [];
+
+      let allWords: Array<{ word: string; speaker: string; start: number; end: number }> = [];
+      let fallbackFullText = "";
+
+      for (const part of parts) {
+        if (part.text) {
+          fallbackFullText += part.text + "\n";
+        }
+        const at = part.audioTranscription;
+        if (at) {
+          const speaker = at.speakerLabel || at.speaker || "";
+          if (Array.isArray(at.words)) {
+            for (const w of at.words) {
+              allWords.push({
+                word: w.word || "",
+                speaker: speaker,
+                start: parseOffsetSeconds(w.startOffset || w.start_offset || 0),
+                end: parseOffsetSeconds(w.endOffset || w.end_offset || 0),
+              });
             }
           }
+        }
+      }
+
+      // 単語アノテーションが存在する場合、自然な会話セグメントに再構成
+      if (allWords.length > 0) {
+        let curSpeaker = "";
+        let curWords: string[] = [];
+        let curStart = 0;
+        let curEnd = 0;
+
+        const flush = () => {
+          if (curWords.length === 0) return;
+          const text = curWords.join("").trim();
+          if (text) {
+            const spkId = getSpeakerId(curSpeaker || "SPEAKER_00");
+            parsedSegments.push({
+              id: `seg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+              speaker: spkId,
+              text: text,
+              start: Math.round(curStart * 10) / 10,
+              end: Math.round(curEnd * 10) / 10,
+            });
+          }
+          curWords = [];
         };
 
-        if (customVocab.length > 0) {
-          transcribeBody.generationConfig.audioTranscriptionConfig.customVocabulary = customVocab;
-        }
-
-        const transcribeRes = await fetch(transcribeUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(transcribeBody),
-        });
-
-        if (transcribeRes.ok) {
-          const genData = await transcribeRes.json();
-          console.log("[Gemini API] Gemini 3.5 Transcribe response received successfully");
-
-          const candidate = genData.candidates?.[0];
-          const parts = candidate?.content?.parts || [];
-
-          let allWords: Array<{ word: string; speaker: string; start: number; end: number }> = [];
-          let fallbackFullText = "";
-
-          for (const part of parts) {
-            if (part.text) {
-              fallbackFullText += part.text + "\n";
-            }
-            const at = part.audioTranscription;
-            if (at) {
-              const speaker = at.speakerLabel || at.speaker || "";
-              if (Array.isArray(at.words)) {
-                for (const w of at.words) {
-                  allWords.push({
-                    word: w.word || "",
-                    speaker: speaker,
-                    start: parseOffsetSeconds(w.startOffset || w.start_offset || 0),
-                    end: parseOffsetSeconds(w.endOffset || w.end_offset || 0),
-                  });
-                }
-              }
-            }
-          }
-
-          // 単語アノテーションが存在する場合、自然な会話セグメントに再構成
-          if (allWords.length > 0) {
-            let curSpeaker = "";
-            let curWords: string[] = [];
-            let curStart = 0;
-            let curEnd = 0;
-
-            const flush = () => {
-              if (curWords.length === 0) return;
-              const text = curWords.join("").trim();
-              if (text) {
-                const spkId = getSpeakerId(curSpeaker || "SPEAKER_00");
-                parsedSegments.push({
-                  id: `seg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
-                  speaker: spkId,
-                  text: text,
-                  start: Math.round(curStart * 10) / 10,
-                  end: Math.round(curEnd * 10) / 10,
-                });
-              }
-              curWords = [];
-            };
-
-            for (const item of allWords) {
-              const spk = item.speaker || "SPEAKER_00";
-              if (curWords.length === 0) {
-                curSpeaker = spk;
-                curStart = item.start;
-                curEnd = item.end;
-                curWords.push(item.word);
-              } else if (
-                curSpeaker !== spk ||
-                (item.start - curEnd > 1.2) ||
-                /[。！？\n]$/.test(curWords[curWords.length - 1])
-              ) {
-                flush();
-                curSpeaker = spk;
-                curStart = item.start;
-                curEnd = item.end;
-                curWords.push(item.word);
-              } else {
-                curWords.push(item.word);
-                curEnd = Math.max(curEnd, item.end);
-              }
-            }
+        for (const item of allWords) {
+          const spk = item.speaker || "SPEAKER_00";
+          if (curWords.length === 0) {
+            curSpeaker = spk;
+            curStart = item.start;
+            curEnd = item.end;
+            curWords.push(item.word);
+          } else if (
+            curSpeaker !== spk ||
+            (item.start - curEnd > 1.2) ||
+            /[。！？\n]$/.test(curWords[curWords.length - 1])
+          ) {
             flush();
-          } else if (fallbackFullText.trim()) {
-            // テキストのみ返却された場合
-            parsedSegments.push({
-              id: `seg_${Date.now()}_0`,
-              speaker: "SPEAKER_00",
-              text: fallbackFullText.trim(),
-              start: 0,
-              end: 0,
-            });
-          }
-
-          if (parsedSegments.length > 0) {
-            usedModel = "gemini-3.5-transcribe";
-            console.log(`[Gemini API] Successfully parsed ${parsedSegments.length} segments with Gemini 3.5 Transcribe!`);
-          }
-        } else {
-          const errText = await transcribeRes.text();
-          lastError = `gemini-3.5-transcribe (${transcribeRes.status}): ${errText}`;
-          console.warn("[Gemini API] gemini-3.5-transcribe generateContent failed:", lastError);
-
-          // 後方互換性のため、Interactions API でも再試行してみる
-          try {
-            console.log("[Gemini API] Retrying via Interactions API...");
-            const interUrl = `https://generativelanguage.googleapis.com/v1beta/interactions?key=${apiKey}`;
-            const interRes = await fetch(interUrl, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                model: "gemini-3.5-transcribe",
-                input: [{ type: "audio", uri: fileUri, mime_type: mimeType }],
-                generation_config: {
-                  transcription_config: {
-                    language_codes: ["ja-JP"],
-                    enable_speaker_diarization: true,
-                    enable_word_timestamps: true,
-                  }
-                }
-              })
-            });
-            if (interRes.ok) {
-              const interData = await interRes.json();
-              const step = interData.steps?.[0]?.content?.[0];
-              const annotations = step?.annotations;
-              if (annotations?.speaker_turns && Array.isArray(annotations.speaker_turns) && annotations.speaker_turns.length > 0) {
-                for (const turn of annotations.speaker_turns) {
-                  const spkId = getSpeakerId(turn.speaker || "SPEAKER_00");
-                  const start = parseOffsetSeconds(turn.start_offset || 0);
-                  const end = parseOffsetSeconds(turn.end_offset || start + 2);
-                  parsedSegments.push({
-                    id: `seg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
-                    speaker: spkId,
-                    text: (turn.text || "").trim(),
-                    start: Math.round(start * 10) / 10,
-                    end: Math.round(end * 10) / 10,
-                  });
-                }
-                if (parsedSegments.length > 0) {
-                  usedModel = "gemini-3.5-transcribe";
-                  console.log(`[Gemini API] Successfully parsed ${parsedSegments.length} segments from Interactions API!`);
-                }
-              }
-            }
-          } catch (e2: any) {
-            console.warn("[Gemini API] Interactions retry also failed:", e2.message);
-          }
-        }
-      } catch (e: any) {
-        lastError = `gemini-3.5-transcribe exception: ${e.message}`;
-        console.warn("[Gemini API] Gemini 3.5 Transcribe exception, proceeding to fallback:", e);
-      }
-    }
-
-    // B. generateContent による文字起こし（Interactions API 未使用またはフォールバック時）
-    if (parsedSegments.length === 0) {
-      let rawText = "";
-      const fallbackModels = candidateModels.filter(m => m !== "gemini-3.5-transcribe" && !m.includes("flash-lite"));
-      if (fallbackModels.length === 0) {
-        fallbackModels.push("gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash");
-      }
-
-      const modelErrors: Record<string, string> = {};
-
-      for (const modelCandidate of fallbackModels) {
-        const generateUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelCandidate}:generateContent?key=${apiKey}`;
-        console.log(`[Gemini API] Requesting fallback transcription with model: ${modelCandidate}`);
-        try {
-          const genRes = await fetch(generateUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{
-                parts: [
-                  { fileData: { fileUri, mimeType } },
-                  { text: promptText }
-                ]
-              }],
-              generationConfig: {
-                temperature: 0.0, // 決定論的で忠実な出力
-                maxOutputTokens: 65536
-              }
-            }),
-          });
-
-          if (genRes.ok) {
-            const genData = await genRes.json();
-            const candidateText = genData.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (candidateText && candidateText.trim().length > 0) {
-              rawText = candidateText;
-              usedModel = modelCandidate;
-              console.log(`[Gemini API] Successfully transcribed using fallback model: ${modelCandidate}`);
-              break;
-            }
+            curSpeaker = spk;
+            curStart = item.start;
+            curEnd = item.end;
+            curWords.push(item.word);
           } else {
-            const errBody = await genRes.text();
-            lastError = `(${genRes.status}) ${errBody}`;
-            modelErrors[modelCandidate] = lastError;
-            console.warn(`[Gemini API] Model ${modelCandidate} error: ${lastError}`);
+            curWords.push(item.word);
+            curEnd = Math.max(curEnd, item.end);
           }
-        } catch (e: any) {
-          lastError = e.message;
-          modelErrors[modelCandidate] = lastError;
-          console.warn(`[Gemini API] Exception with ${modelCandidate}:`, e);
         }
+        flush();
+      } else if (fallbackFullText.trim()) {
+        parsedSegments.push({
+          id: `seg_${Date.now()}_0`,
+          speaker: "SPEAKER_00",
+          text: fallbackFullText.trim(),
+          start: 0,
+          end: 0,
+        });
       }
 
-      if (!rawText) {
-        const errDetails = Object.entries(modelErrors)
-          .map(([m, err]) => `・【${m}】: ${err}`)
-          .join("\n");
+      if (parsedSegments.length === 0) {
         return NextResponse.json(
-          { error: `Gemini 文字起こしに失敗しました:\n${errDetails || lastError}` },
+          { error: `【${activeModel}】文字起こし結果が取得できませんでした（結果が空です）。` },
+          { status: 500 }
+        );
+      }
+    } else {
+      // B. ユーザーが明示的に汎用モデル（gemini-2.5-pro 等）を指定した場合
+      const generateUrl = `https://generativelanguage.googleapis.com/v1beta/models/${activeModel}:generateContent?key=${apiKey}`;
+      console.log(`[Gemini API] Requesting transcription with user-specified model: ${activeModel}`);
+      const genRes = await fetch(generateUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { fileData: { fileUri, mimeType } },
+              { text: promptText }
+            ]
+          }],
+          generationConfig: {
+            temperature: 0.0,
+            maxOutputTokens: 65536
+          }
+        }),
+      });
+
+      if (!genRes.ok) {
+        const errBody = await genRes.text();
+        let errMsg = errBody;
+        try {
+          const errJson = JSON.parse(errBody);
+          errMsg = errJson.error?.message || errBody;
+        } catch {}
+        return NextResponse.json(
+          { error: `【${activeModel} エラー (${genRes.status})】\n${errMsg}` },
+          { status: genRes.status }
+        );
+      }
+
+      const genData = await genRes.json();
+      const rawText = genData.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!rawText || !rawText.trim()) {
+        return NextResponse.json(
+          { error: `【${activeModel} エラー】モデルからの文字起こし応答が空でした。` },
           { status: 500 }
         );
       }
