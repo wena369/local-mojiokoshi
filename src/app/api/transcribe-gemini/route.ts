@@ -138,12 +138,15 @@ export async function POST(req: NextRequest) {
     let candidateModels: string[] = [];
 
     // ユーザー指定モデル
-    if (requestedModel && !requestedModel.includes("transcribe") && !requestedModel.includes("flash-lite")) {
+    if (requestedModel && !requestedModel.includes("flash-lite")) {
       candidateModels.push(requestedModel);
+    } else {
+      candidateModels.push("gemini-3.5-transcribe");
     }
 
     // 推奨の現役モデル優先順
     const preferredOrder = [
+      "gemini-3.5-transcribe",
       "gemini-2.5-flash",
       "gemini-2.5-pro",
       "gemini-2.0-flash",
@@ -265,114 +268,190 @@ export async function POST(req: NextRequest) {
     let usedModel = "";
     let lastError = "";
 
-    // A. 最新音声特化モデル（gemini-3.5-transcribe）の Interactions API を最優先で試行
+    // A. 最新公式音声特化モデル（gemini-3.5-transcribe）を公式 generateContent API で最優先実行
     if (candidateModels.includes("gemini-3.5-transcribe")) {
       try {
-        console.log("[Gemini API] Attempting Gemini 3.5 Transcribe via Interactions API...");
-        const interactionsUrl = `https://generativelanguage.googleapis.com/v1beta/interactions?key=${apiKey}`;
+        console.log("[Gemini API] Requesting Gemini 3.5 Transcribe via official generateContent endpoint...");
+        const transcribeUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-transcribe:generateContent?key=${apiKey}`;
         const customVocab = customWordsList.map((w: any) => w.term?.trim()).filter(Boolean);
-        const interBody: any = {
-          model: "gemini-3.5-transcribe",
-          input: [{
-            type: "audio",
-            uri: fileUri,
-            mime_type: mimeType
-          }],
-          generation_config: {
-            transcription_config: {
-              mode: {
-                type: "verbatim",
-                diarization_mode: "speaker",
-                timestamp_granularities: ["word"]
-              }
+
+        const transcribeBody: any = {
+          contents: [
+            {
+              parts: [
+                {
+                  fileData: {
+                    fileUri: fileUri,
+                    mimeType: mimeType,
+                  }
+                }
+              ]
+            }
+          ],
+          generationConfig: {
+            audioTranscriptionConfig: {
+              languageCodes: ["ja-JP"],
+              diarization: true,
+              wordTimestamp: true,
             }
           }
         };
+
         if (customVocab.length > 0) {
-          interBody.generation_config.transcription_config.custom_vocabulary = customVocab;
+          transcribeBody.generationConfig.audioTranscriptionConfig.customVocabulary = customVocab;
         }
 
-        const interRes = await fetch(interactionsUrl, {
+        const transcribeRes = await fetch(transcribeUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(interBody)
+          body: JSON.stringify(transcribeBody),
         });
 
-        if (interRes.ok) {
-          const interData = await interRes.json();
-          console.log("[Gemini API] Gemini 3.5 Transcribe Interactions API response received");
+        if (transcribeRes.ok) {
+          const genData = await transcribeRes.json();
+          console.log("[Gemini API] Gemini 3.5 Transcribe response received successfully");
 
-          const step = interData.steps?.[0]?.content?.[0];
-          const annotations = step?.annotations;
+          const candidate = genData.candidates?.[0];
+          const parts = candidate?.content?.parts || [];
 
-          if (annotations?.speaker_turns && Array.isArray(annotations.speaker_turns) && annotations.speaker_turns.length > 0) {
-            for (const turn of annotations.speaker_turns) {
-              const spkId = getSpeakerId(turn.speaker || "SPEAKER_00");
-              const start = parseOffsetSeconds(turn.start_offset || 0);
-              const end = parseOffsetSeconds(turn.end_offset || start + 2);
-              parsedSegments.push({
-                id: `seg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
-                speaker: spkId,
-                text: (turn.text || "").trim(),
-                start: Math.round(start * 10) / 10,
-                end: Math.round(end * 10) / 10,
-              });
+          let allWords: Array<{ word: string; speaker: string; start: number; end: number }> = [];
+          let fallbackFullText = "";
+
+          for (const part of parts) {
+            if (part.text) {
+              fallbackFullText += part.text + "\n";
             }
-          } else if (annotations?.word_info && Array.isArray(annotations.word_info) && annotations.word_info.length > 0) {
-            let curSpk = "";
+            const at = part.audioTranscription;
+            if (at) {
+              const speaker = at.speakerLabel || at.speaker || "";
+              if (Array.isArray(at.words)) {
+                for (const w of at.words) {
+                  allWords.push({
+                    word: w.word || "",
+                    speaker: speaker,
+                    start: parseOffsetSeconds(w.startOffset || w.start_offset || 0),
+                    end: parseOffsetSeconds(w.endOffset || w.end_offset || 0),
+                  });
+                }
+              }
+            }
+          }
+
+          // 単語アノテーションが存在する場合、自然な会話セグメントに再構成
+          if (allWords.length > 0) {
+            let curSpeaker = "";
             let curWords: string[] = [];
             let curStart = 0;
             let curEnd = 0;
 
             const flush = () => {
               if (curWords.length === 0) return;
-              const text = curWords.join("");
-              const spkId = getSpeakerId(curSpk || "SPEAKER_00");
-              parsedSegments.push({
-                id: `seg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
-                speaker: spkId,
-                text: text.trim(),
-                start: Math.round(curStart * 10) / 10,
-                end: Math.round(curEnd * 10) / 10,
-              });
+              const text = curWords.join("").trim();
+              if (text) {
+                const spkId = getSpeakerId(curSpeaker || "SPEAKER_00");
+                parsedSegments.push({
+                  id: `seg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+                  speaker: spkId,
+                  text: text,
+                  start: Math.round(curStart * 10) / 10,
+                  end: Math.round(curEnd * 10) / 10,
+                });
+              }
               curWords = [];
             };
 
-            for (const w of annotations.word_info) {
-              const spk = w.speaker || "SPEAKER_00";
-              const wStart = parseOffsetSeconds(w.start_offset);
-              const wEnd = parseOffsetSeconds(w.end_offset || wStart + 0.3);
-
+            for (const item of allWords) {
+              const spk = item.speaker || "SPEAKER_00";
               if (curWords.length === 0) {
-                curSpk = spk;
-                curStart = wStart;
-                curEnd = wEnd;
-                curWords.push(w.text);
-              } else if (curSpk !== spk || (wStart - curEnd > 1.5) || /[。！？\n]$/.test(curWords[curWords.length - 1])) {
+                curSpeaker = spk;
+                curStart = item.start;
+                curEnd = item.end;
+                curWords.push(item.word);
+              } else if (
+                curSpeaker !== spk ||
+                (item.start - curEnd > 1.2) ||
+                /[。！？\n]$/.test(curWords[curWords.length - 1])
+              ) {
                 flush();
-                curSpk = spk;
-                curStart = wStart;
-                curEnd = wEnd;
-                curWords.push(w.text);
+                curSpeaker = spk;
+                curStart = item.start;
+                curEnd = item.end;
+                curWords.push(item.word);
               } else {
-                curWords.push(w.text);
-                curEnd = wEnd;
+                curWords.push(item.word);
+                curEnd = Math.max(curEnd, item.end);
               }
             }
             flush();
+          } else if (fallbackFullText.trim()) {
+            // テキストのみ返却された場合
+            parsedSegments.push({
+              id: `seg_${Date.now()}_0`,
+              speaker: "SPEAKER_00",
+              text: fallbackFullText.trim(),
+              start: 0,
+              end: 0,
+            });
           }
 
           if (parsedSegments.length > 0) {
             usedModel = "gemini-3.5-transcribe";
-            console.log(`[Gemini API] Successfully parsed ${parsedSegments.length} segments from Gemini 3.5 Transcribe!`);
+            console.log(`[Gemini API] Successfully parsed ${parsedSegments.length} segments with Gemini 3.5 Transcribe!`);
           }
         } else {
-          lastError = `Interactions API (${interRes.status}): ${await interRes.text()}`;
-          console.warn("[Gemini API] Interactions API attempt failed:", lastError);
+          const errText = await transcribeRes.text();
+          lastError = `gemini-3.5-transcribe (${transcribeRes.status}): ${errText}`;
+          console.warn("[Gemini API] gemini-3.5-transcribe generateContent failed:", lastError);
+
+          // 後方互換性のため、Interactions API でも再試行してみる
+          try {
+            console.log("[Gemini API] Retrying via Interactions API...");
+            const interUrl = `https://generativelanguage.googleapis.com/v1beta/interactions?key=${apiKey}`;
+            const interRes = await fetch(interUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                model: "gemini-3.5-transcribe",
+                input: [{ type: "audio", uri: fileUri, mime_type: mimeType }],
+                generation_config: {
+                  transcription_config: {
+                    language_codes: ["ja-JP"],
+                    enable_speaker_diarization: true,
+                    enable_word_timestamps: true,
+                  }
+                }
+              })
+            });
+            if (interRes.ok) {
+              const interData = await interRes.json();
+              const step = interData.steps?.[0]?.content?.[0];
+              const annotations = step?.annotations;
+              if (annotations?.speaker_turns && Array.isArray(annotations.speaker_turns) && annotations.speaker_turns.length > 0) {
+                for (const turn of annotations.speaker_turns) {
+                  const spkId = getSpeakerId(turn.speaker || "SPEAKER_00");
+                  const start = parseOffsetSeconds(turn.start_offset || 0);
+                  const end = parseOffsetSeconds(turn.end_offset || start + 2);
+                  parsedSegments.push({
+                    id: `seg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+                    speaker: spkId,
+                    text: (turn.text || "").trim(),
+                    start: Math.round(start * 10) / 10,
+                    end: Math.round(end * 10) / 10,
+                  });
+                }
+                if (parsedSegments.length > 0) {
+                  usedModel = "gemini-3.5-transcribe";
+                  console.log(`[Gemini API] Successfully parsed ${parsedSegments.length} segments from Interactions API!`);
+                }
+              }
+            }
+          } catch (e2: any) {
+            console.warn("[Gemini API] Interactions retry also failed:", e2.message);
+          }
         }
       } catch (e: any) {
-        lastError = `Interactions API exception: ${e.message}`;
-        console.warn("[Gemini API] Interactions API error, proceeding to generateContent fallback:", e);
+        lastError = `gemini-3.5-transcribe exception: ${e.message}`;
+        console.warn("[Gemini API] Gemini 3.5 Transcribe exception, proceeding to fallback:", e);
       }
     }
 

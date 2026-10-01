@@ -485,10 +485,10 @@ export default function Home() {
   const [geminiModel, setGeminiModel] = useState<string>(() => {
     try {
       const saved = localStorage.getItem(LS_GEMINI_MODEL_KEY);
-      if (saved && !saved.includes("transcribe") && !saved.includes("flash-lite")) return saved;
-      return "gemini-2.5-flash";
+      if (saved && !saved.includes("flash-lite")) return saved;
+      return "gemini-3.5-transcribe";
     } catch {
-      return "gemini-2.5-flash";
+      return "gemini-3.5-transcribe";
     }
   });
   const [deepgramApiKey, setDeepgramApiKey] = useState<string>(() => {
@@ -1397,7 +1397,7 @@ export default function Home() {
           throw new Error("Google File Upload did not return a valid file URI");
         }
 
-        setProgress({ step: "🚀 Gemini 2.0 Flash が超高速で文字起こし中...", percent: 50 });
+        setProgress({ step: `🚀 ${geminiModel || "Gemini 3.5 Transcribe"} が超高速で文字起こし中...`, percent: 50 });
         
         // 2. 取得した fileUri だけを Vercel サーバーレス API に送信
         const geminiFormData = new FormData();
@@ -3725,7 +3725,7 @@ export default function Home() {
                     <input
                       type="text"
                       list="gemini-models-list"
-                      placeholder="gemini-2.5-flash"
+                      placeholder="gemini-3.5-transcribe"
                       value={geminiModel}
                       onChange={(e) => {
                         setGeminiModel(e.target.value);
@@ -3734,13 +3734,14 @@ export default function Home() {
                       className="w-full bg-slate-900 border border-blue-500/40 rounded-xl px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-400 font-mono"
                     />
                     <datalist id="gemini-models-list">
-                      <option value="gemini-2.5-flash">gemini-2.5-flash（Google最新主力・高速高精度・推奨）</option>
+                      <option value="gemini-3.5-transcribe">gemini-3.5-transcribe（Google公式 音声文字起こし専用モデル・話者分離＆タイムスタンプ最高精度・推奨）</option>
+                      <option value="gemini-2.5-flash">gemini-2.5-flash（Google最新主力・高速高精度・汎用推奨）</option>
                       <option value="gemini-2.5-pro">gemini-2.5-pro（Google最新最高峰・文脈推論No.1）</option>
                       <option value="gemini-2.0-flash">gemini-2.0-flash（高速・安定）</option>
                       <option value="gemini-1.5-pro">gemini-1.5-pro（長文音声・高推論）</option>
                       <option value="gemini-1.5-flash">gemini-1.5-flash（標準・安定）</option>
                     </datalist>
-                    <p className="text-[11px] text-slate-400">※推奨: <code>gemini-2.5-flash</code>（最新標準・高速高精度）または <code>gemini-2.5-pro</code>（最高精度・文脈推論）</p>
+                    <p className="text-[11px] text-slate-400">※推奨: <code>gemini-3.5-transcribe</code>（音声文字起こし特化の最新モデル）または <code>gemini-2.5-flash</code></p>
                   </div>
                 </div>
               )}
