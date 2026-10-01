@@ -247,9 +247,9 @@ export async function POST(req: NextRequest) {
         }
       };
 
-      if (customVocab.length > 0) {
-        transcribeBody.generationConfig.audioTranscriptionConfig.customVocabulary = customVocab;
-      }
+      // 💡 Google Gemini API 公式制約:
+      // audioTranscriptionConfig では `wordTimestamp: true` と `customVocabulary` は併用不可（400エラー: custom_vocabulary is incompatible with word timestamps）。
+      // そのため API リクエスト側には customVocabulary を渡さず、取得後のセグメントに対しサーバー/クライアント側で確実にカスタム辞書置換を適用します。
 
       const transcribeRes = await fetch(transcribeUrl, {
         method: "POST",
