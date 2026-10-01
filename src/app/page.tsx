@@ -485,7 +485,7 @@ export default function Home() {
   const [geminiModel, setGeminiModel] = useState<string>(() => {
     try {
       const saved = localStorage.getItem(LS_GEMINI_MODEL_KEY);
-      if (saved && !saved.includes("flash-lite")) return saved;
+      if (saved && !saved.includes("2.5-flash") && !saved.includes("flash-lite")) return saved;
       return "gemini-3.5-transcribe";
     } catch {
       return "gemini-3.5-transcribe";
@@ -916,11 +916,11 @@ export default function Home() {
       const savedGeminiKey = localStorage.getItem(LS_GEMINI_KEY_KEY);
       if (savedGeminiKey) setGeminiApiKey(savedGeminiKey);
       const savedGeminiModel = localStorage.getItem(LS_GEMINI_MODEL_KEY);
-      if (savedGeminiModel && !savedGeminiModel.includes("transcribe") && !savedGeminiModel.includes("flash-lite")) {
+      if (savedGeminiModel && !savedGeminiModel.includes("2.5-flash") && !savedGeminiModel.includes("flash-lite")) {
         setGeminiModel(savedGeminiModel);
       } else {
-        setGeminiModel("gemini-2.5-flash");
-        try { localStorage.setItem(LS_GEMINI_MODEL_KEY, "gemini-2.5-flash"); } catch {}
+        setGeminiModel("gemini-3.5-transcribe");
+        try { localStorage.setItem(LS_GEMINI_MODEL_KEY, "gemini-3.5-transcribe"); } catch {}
       }
       const savedDgKey = localStorage.getItem(LS_DEEPGRAM_KEY_KEY);
       if (savedDgKey) setDeepgramApiKey(savedDgKey);
@@ -3817,11 +3817,9 @@ export default function Home() {
                     />
                     <datalist id="gemini-models-list">
                       <option value="gemini-3.5-transcribe">gemini-3.5-transcribe（Google公式 音声文字起こし専用モデル・話者分離＆タイムスタンプ最高精度・推奨）</option>
-                      <option value="gemini-2.5-flash">gemini-2.5-flash（Google最新主力・高速高精度・汎用推奨）</option>
-                      <option value="gemini-2.5-pro">gemini-2.5-pro（Google最新最高峰・文脈推論No.1）</option>
+                      <option value="gemini-3.8-flash">gemini-3.8-flash（Google最新フラッシュモデル）</option>
+                      <option value="gemini-2.5-pro">gemini-2.5-pro（Google最高峰・文脈推論No.1）</option>
                       <option value="gemini-2.0-flash">gemini-2.0-flash（高速・安定）</option>
-                      <option value="gemini-1.5-pro">gemini-1.5-pro（長文音声・高推論）</option>
-                      <option value="gemini-1.5-flash">gemini-1.5-flash（標準・安定）</option>
                     </datalist>
                     <p className="text-[11px] text-slate-400">※推奨: <code>gemini-3.5-transcribe</code>（音声文字起こし特化の最新モデル。下位バージョンへの自動フォールバックは行わず、失敗時は直接エラーが表示されます）</p>
                   </div>

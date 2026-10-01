@@ -55,7 +55,8 @@ export async function POST(req: NextRequest) {
     }
 
     // デフォルトモデルは最新の公式音声特化モデル gemini-3.5-transcribe
-    if (!modelParam) {
+    // 廃止された 2.5-flash や flash-lite が届いた場合も最新の gemini-3.5-transcribe に自動昇格
+    if (!modelParam || modelParam.includes("2.5-flash") || modelParam.includes("flash-lite")) {
       modelParam = "gemini-3.5-transcribe";
     }
 
@@ -121,7 +122,7 @@ export async function POST(req: NextRequest) {
     // 2. 使用するGeminiモデルの決定
     // gemini-3.5-transcribe 以外の旧モデルへの勝手なフォールバックは行わず、失敗時は直接エラーを返す
     const requestedModel = (modelParam || "").replace("models/", "").trim();
-    const activeModel = requestedModel && !requestedModel.includes("flash-lite")
+    const activeModel = requestedModel && !requestedModel.includes("2.5-flash") && !requestedModel.includes("flash-lite")
       ? requestedModel
       : "gemini-3.5-transcribe";
 
