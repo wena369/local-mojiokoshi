@@ -643,6 +643,18 @@ export default function Home() {
   const [speakerCountHint, setSpeakerCountHint] = useState<string>("auto");
   const [isRefiningSpeakers, setIsRefiningSpeakers] = useState<boolean>(false);
 
+  // 🔍 単語の一括置換 State
+  const [showFindReplaceModal, setShowFindReplaceModal] = useState<boolean>(false);
+  const [findWord, setFindWord] = useState<string>("");
+  const [replaceWord, setReplaceWord] = useState<string>("");
+  const [addToDictionaryOnReplace, setAddToDictionaryOnReplace] = useState<boolean>(true);
+  const [replaceInRefinedAndSummary, setReplaceInRefinedAndSummary] = useState<boolean>(true);
+
+  // 👥 話者の一括変更 State
+  const [reassignModalOpen, setReassignModalOpen] = useState<boolean>(false);
+  const [reassignFromSpeaker, setReassignFromSpeaker] = useState<string>("");
+  const [reassignToSpeaker, setReassignToSpeaker] = useState<string>("");
+
   const handleRefineSpeakers = async () => {
     if (!result || !result.segments || result.segments.length === 0) return;
     if (!geminiApiKey.trim()) {
@@ -1191,11 +1203,35 @@ export default function Home() {
     return Array.from(merged).sort();
   }, [uniqueSpeakers, extraSpeakers]);
 
-  const getSpeakerLabel = (speakerId: string) => {
-    const name = speakerNames[speakerId];
+  // 話者の自然な表示名（設定された漢字名・ニックネーム最優先）
+  const getSpeakerDisplayName = useCallback((speakerId: string) => {
+    if (!speakerId) return '話者未定';
+    // 1. ユーザーが設定・編集した話者名（漢字や愛称）
+    const custom = speakerNames[speakerId];
+    if (custom && custom.trim()) return custom.trim();
+
+    // 2. 事前登録話者からの自動補完（SPEAKER_00 -> 0番目）
+    const numMatch = speakerId.match(/(\d+)/);
+    if (numMatch && usePreRegistration && preRegisteredSpeakers) {
+      const idx = parseInt(numMatch[1], 10);
+      const pre = preRegisteredSpeakers[idx];
+      if (pre) {
+        const n = (pre.nickname || '').trim();
+        const r = (pre.realName || '').trim();
+        if (n && r) return `${n} (${r})`;
+        if (n || r) return n || r;
+      }
+    }
+
+    // 3. フォールバック（「話者01」「話者02」など自然な日本語表示）
+    return speakerId.replace('SPEAKER_', '話者');
+  }, [speakerNames, usePreRegistration, preRegisteredSpeakers]);
+
+  const getSpeakerLabel = useCallback((speakerId: string) => {
+    const disp = getSpeakerDisplayName(speakerId);
     const short = speakerId.replace('SPEAKER_', '話者');
-    return name ? `${short} (${name})` : short;
-  };
+    return disp !== short ? `${disp} (${short})` : short;
+  }, [getSpeakerDisplayName]);
 
   // 話者追加: 次の番号を自動採番
   const addSpeaker = useCallback(() => {
@@ -1218,6 +1254,111 @@ export default function Home() {
     setSpeakerReadings(prev => { const n = { ...prev }; delete n[speakerId]; return n; });
     setSpeakerRoles(prev => { const n = { ...prev }; delete n[speakerId]; return n; });
   }, [uniqueSpeakers]);
+
+  // 👥 特定の話者IDの全発言を別の話者に一括変更
+  const reassignSpeakerAll = useCallback((fromSpeaker: string, toSpeaker: string) => {
+    if (!fromSpeaker || !toSpeaker || fromSpeaker === toSpeaker) return;
+    if (!result?.segments || !Array.isArray(result.segments)) return;
+
+    const count = result.segments.filter((s: any) => s.speaker === fromSpeaker).length;
+    if (count === 0) {
+      alert("変更対象の発言がありません。");
+      return;
+    }
+
+    setResult((prev: any) => {
+      if (!prev?.segments) return prev;
+      const updated = prev.segments.map((s: any) => {
+        if (s.speaker === fromSpeaker) {
+          return { ...s, speaker: toSpeaker };
+        }
+        return s;
+      });
+      return { ...prev, segments: updated };
+    });
+
+    const fromLabel = getSpeakerDisplayName(fromSpeaker);
+    const toLabel = getSpeakerDisplayName(toSpeaker);
+    setCopied(`「${fromLabel}」の全発言 (${count}件) を「${toLabel}」に一括変更しました`);
+    setTimeout(() => setCopied(null), 3000);
+    setReassignModalOpen(false);
+  }, [result, getSpeakerDisplayName]);
+
+  // 🔍 単語の一括置換（全セグメント・推敲文・要約、および辞書自動追加）
+  const handleBatchReplaceWord = useCallback(() => {
+    const target = findWord.trim();
+    const replacement = replaceWord.trim();
+    if (!target) {
+      alert("置換前の単語を入力してください。");
+      return;
+    }
+    if (!result?.segments || result.segments.length === 0) {
+      alert("置換対象の文字起こしデータがありません。");
+      return;
+    }
+
+    let matchCount = 0;
+    const escapedTarget = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escapedTarget, 'g');
+
+    // 1. セグメントの置換
+    const updatedSegments = result.segments.map((s: any) => {
+      const origText = s.text || '';
+      const matches = origText.match(regex);
+      if (matches) {
+        matchCount += matches.length;
+      }
+      return {
+        ...s,
+        text: origText.replace(regex, replacement),
+      };
+    });
+
+    // 2. 推敲文・要約の置換
+    let updatedRefined = result.refinedText;
+    let updatedSummary = result.summary;
+
+    if (replaceInRefinedAndSummary) {
+      if (updatedRefined) {
+        const matches = updatedRefined.match(regex);
+        if (matches) matchCount += matches.length;
+        updatedRefined = updatedRefined.replace(regex, replacement);
+      }
+      if (updatedSummary) {
+        const matches = updatedSummary.match(regex);
+        if (matches) matchCount += matches.length;
+        updatedSummary = updatedSummary.replace(regex, replacement);
+      }
+    }
+
+    setResult((prev: any) => ({
+      ...prev,
+      segments: updatedSegments,
+      refinedText: updatedRefined,
+      summary: updatedSummary,
+    }));
+
+    // 3. カスタム辞書への自動追加（任意）
+    if (addToDictionaryOnReplace && replacement) {
+      const exists = customWords.some(w => w.term === replacement);
+      if (!exists) {
+        const newWord: CustomWord = {
+          id: `cw_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          term: replacement,
+          reading: target, // 置換前の単語を読み・誤変換パターンとして記録
+          category: '一括置換単語',
+          enabled: true,
+        };
+        setCustomWords(prev => [newWord, ...prev]);
+      }
+    }
+
+    setCopied(`「${target}」➔「${replacement || '(削除)'}」: 計 ${matchCount} 箇所を一括置換しました！`);
+    setTimeout(() => setCopied(null), 4000);
+    setShowFindReplaceModal(false);
+    setFindWord("");
+    setReplaceWord("");
+  }, [findWord, replaceWord, result, replaceInRefinedAndSummary, addToDictionaryOnReplace, customWords]);
 
   // ---- セグメント編集操作（IDまたはインデックスで安全に対象を特定） ----
   const updateSegmentText = useCallback((target: string | number, newText: string) => {
@@ -1287,10 +1428,10 @@ export default function Home() {
     if (allSpeakers.length === 0) return '';
     const lines = ['=== 話者一覧 ==='];
     allSpeakers.forEach(sp => {
+      const dispName = getSpeakerDisplayName(sp);
       const short = sp.replace('SPEAKER_', '話者');
-      const name = speakerNames[sp] || '（未設定）';
       const role = speakerRoles[sp] || '参加者';
-      lines.push(`${short} = ${name}（${role}）`);
+      lines.push(`${dispName}（${role}） [ID: ${short}]`);
     });
     lines.push('================', '');
     return lines.join('\n');
@@ -1300,7 +1441,7 @@ export default function Home() {
   const downloadSpeakerTranscript = (targetSpeaker: string) => {
     if (!result?.segments) return;
     const segments = result.segments;
-    const name = speakerNames[targetSpeaker] || targetSpeaker.replace('SPEAKER_', '話者');
+    const dispName = getSpeakerDisplayName(targetSpeaker);
     const short = targetSpeaker.replace('SPEAKER_', '話者');
     
     // Find all indices where the target speaker talks
@@ -1321,7 +1462,7 @@ export default function Home() {
     // Build output
     const sortedIndices = Array.from(includeIndices).sort((a, b) => a - b);
     let lines: string[] = [];
-    lines.push(`=== ${short} (${name}) の発言記録 ===`);
+    lines.push(`=== ${dispName} [${short}] の発言記録 ===`);
     lines.push(`生成日: ${new Date().toLocaleString('ja-JP')}`);
     lines.push(`総発言数: ${targetIndices.size} セグメント`);
     lines.push('================================', '');
@@ -1333,14 +1474,14 @@ export default function Home() {
         lines.push('--- (省略) ---', '');
       }
       const seg = segments[idx];
-      const spLabel = getSpeakerLabel(seg.speaker);
+      const spLabel = getSpeakerDisplayName(seg.speaker);
       const isTarget = seg.speaker === targetSpeaker;
       const prefix = isTarget ? '>> ' : '   ';
       lines.push(`${prefix}[${formatTime(seg.start)}-${formatTime(seg.end)}] ${spLabel}: ${seg.text}`);
       lastIdx = idx;
     }
     
-    downloadAsText(lines.join('\n'), `speaker_${short}_${name}_${new Date().toISOString().slice(0,10)}.txt`);
+    downloadAsText(lines.join('\n'), `speaker_${dispName}_${new Date().toISOString().slice(0,10)}.txt`);
   };
 
   const sendEmail = async (type: 'refined' | 'summary') => {
@@ -1350,7 +1491,7 @@ export default function Home() {
     try {
       const preview = type === 'summary' ? result.segments
         .slice(0, 20)
-        .map((s: any) => `[${s.speaker.replace('SPEAKER_','話者')}] ${s.text}`)
+        .map((s: any) => `[${getSpeakerDisplayName(s.speaker)}] ${s.text}`)
         .join('\n') : undefined;
       const res = await fetch('/api/send-summary', {
         method: 'POST',
@@ -1674,8 +1815,8 @@ export default function Home() {
           const formatDisplayName = (sp: { nickname: string; realName: string }) => {
             const n = (sp.nickname || "").trim();
             const r = (sp.realName || "").trim();
-            if (n && r) return `${n} (${r})`;
-            return n || r;
+            if (r && n) return `${r} (${n})`;
+            return r || n;
           };
 
           seenSpeakers.forEach((spId, idx) => {
@@ -1694,9 +1835,9 @@ export default function Home() {
               if (validPreReg[idx].role) newRoles[spId] = validPreReg[idx].role;
             }
           });
-          setSpeakerNames(prev => ({ ...newNames, ...prev }));
-          setSpeakerReadings(prev => ({ ...newReadings, ...prev }));
-          setSpeakerRoles(prev => ({ ...newRoles, ...prev }));
+          setSpeakerNames(prev => ({ ...prev, ...newNames }));
+          setSpeakerReadings(prev => ({ ...prev, ...newReadings }));
+          setSpeakerRoles(prev => ({ ...prev, ...newRoles }));
         }
 
         return;
@@ -1845,6 +1986,7 @@ export default function Home() {
           }
           
           // 事前登録話者の自動マッピング（SPEAKER_00, SPEAKER_01 ... へ本名とニックネームをローカルで安全に合成して割り当て）
+          let mappedPreRegNames: Record<string, string> = {};
           if (usePreRegistration && preRegisteredSpeakers.length > 0 && completedResult.segments.length > 0) {
             const validPreReg = preRegisteredSpeakers.filter(s => (s.nickname || "").trim() || (s.realName || "").trim());
             const seenSpeakers = Array.from(new Set(completedResult.segments.map((s: any) => s.speaker))).sort() as string[];
@@ -1866,9 +2008,10 @@ export default function Home() {
                 if (validPreReg[idx].role) newRoles[spId] = validPreReg[idx].role;
               }
             });
-            setSpeakerNames(prev => ({ ...newNames, ...prev }));
-            setSpeakerReadings(prev => ({ ...newReadings, ...prev }));
-            setSpeakerRoles(prev => ({ ...newRoles, ...prev }));
+            mappedPreRegNames = newNames;
+            setSpeakerNames(prev => ({ ...prev, ...newNames }));
+            setSpeakerReadings(prev => ({ ...prev, ...newReadings }));
+            setSpeakerRoles(prev => ({ ...prev, ...newRoles }));
           }
 
           // Clear saved job
@@ -1877,9 +2020,10 @@ export default function Home() {
           // Auto-send email if email address is provided and summary exists
           if (forwardEmail && completedResult.summary) {
             try {
+              const currentMergedNames = { ...speakerNames, ...mappedPreRegNames };
               const preview = completedResult.segments
                 .slice(0, 20)
-                .map((s: any) => `[${s.speaker.replace('SPEAKER_','話者')}] ${s.text}`)
+                .map((s: any) => `[${currentMergedNames[s.speaker] || s.speaker.replace('SPEAKER_','話者')}] ${s.text}`)
                 .join('\n');
               const res = await fetch('/api/send-summary', {
                 method: 'POST',
@@ -1888,7 +2032,7 @@ export default function Home() {
                   to: forwardEmail,
                   summary: completedResult.summary,
                   title: file?.name?.replace(/\.[^.]+$/, '') || undefined,
-                  speakers: speakerNames,
+                  speakers: currentMergedNames,
                   transcriptPreview: preview,
                 }),
               });
@@ -2185,13 +2329,11 @@ export default function Home() {
               );
             } else {
               const w1Text = result.segments.slice(0, splitIdx).map((s: any, idx: number) => {
-                const spId = s.speaker || "SPEAKER_00";
-                const name = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
+                const name = getSpeakerDisplayName(s.speaker);
                 return `[#${idx + 1} ${name}] ${s.text || ""}`;
               }).join("\n");
               const w2Text = result.segments.slice(splitIdx).map((s: any, idx: number) => {
-                const spId = s.speaker || "SPEAKER_00";
-                const name = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
+                const name = getSpeakerDisplayName(s.speaker);
                 return `[#${splitIdx + idx + 1} ${name}] ${s.text || ""}`;
               }).join("\n");
 
@@ -2204,8 +2346,7 @@ export default function Home() {
             }
           } else {
             conversationBlocks = result.refinedText || result.segments.map((s: any, idx: number) => {
-              const spId = s.speaker || "SPEAKER_00";
-              const name = speakerNames[spId] || spId.replace("SPEAKER_", "話者");
+              const name = getSpeakerDisplayName(s.speaker);
               return `[#${idx + 1} ${name}] ${s.text || ""}`;
             }).join("\n");
           }
@@ -3276,7 +3417,31 @@ export default function Home() {
                 文字起こし結果
                 <span className="text-sm font-normal text-cyan-300/50">({result.segments?.length || 0} セグメント / {uniqueSpeakers.length} 話者)</span>
               </h2>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setShowFindReplaceModal(true)}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-teal-500/20 text-teal-200 border border-teal-400/40 hover:bg-teal-500/30 transition-all active:scale-95 shadow-sm"
+                  title="誤認識された単語や表記ゆれを全セグメントから一括で検索・置換します"
+                >
+                  <span>🔍</span>
+                  <span>単語を一括置換</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (allSpeakers.length >= 2) {
+                      setReassignFromSpeaker(allSpeakers[0]);
+                      setReassignToSpeaker(allSpeakers[1]);
+                    }
+                    setReassignModalOpen(true);
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-indigo-500/20 text-indigo-200 border border-indigo-400/40 hover:bg-indigo-500/30 transition-all active:scale-95 shadow-sm"
+                  title="ある話者の全発言を別の話者に一括で付け替えます"
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>話者を一括変更</span>
+                </button>
                 <button
                   type="button"
                   onClick={handleRefineSpeakers}
@@ -3352,11 +3517,28 @@ export default function Home() {
                       </select>
                       <button
                         onClick={() => downloadSpeakerTranscript(sp)}
-                        title={`${sp.replace('SPEAKER_','話者')} の発言を個別ダウンロード（前後の会話コンテキスト付き）`}
+                        title={`${getSpeakerDisplayName(sp)} の発言を個別ダウンロード（前後の会話コンテキスト付き）`}
                         className={`p-1.5 rounded-lg hover:bg-slate-700 transition-colors flex-shrink-0 ${c.text}`}
                       >
                         <Download className="w-3.5 h-3.5" />
                       </button>
+                      {/* 全発言一括変更ボタン */}
+                      {isInSegments && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setReassignFromSpeaker(sp);
+                            const other = allSpeakers.find(s => s !== sp) || '';
+                            setReassignToSpeaker(other);
+                            setReassignModalOpen(true);
+                          }}
+                          title={`${getSpeakerDisplayName(sp)} の全発言を別の話者に一括変更`}
+                          className="px-2 py-1 rounded-lg bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25 border border-indigo-500/30 text-xs font-medium transition-colors flex items-center gap-1 flex-shrink-0"
+                        >
+                          <Users className="w-3 h-3" />
+                          <span>一括移行</span>
+                        </button>
+                      )}
                       {/* 削除ボタン: セグメントで未使用の話者のみ */}
                       {!isInSegments && (
                         <button
@@ -3469,7 +3651,7 @@ export default function Home() {
                           {result.segments[effectiveSplit] ? (
                             <>
                               <span className="text-teal-300 font-bold mr-1">
-                                [#{effectiveSplit + 1} {speakerNames[result.segments[effectiveSplit].speaker] || result.segments[effectiveSplit].speaker.replace('SPEAKER_', '話者')}]:
+                                [#{effectiveSplit + 1} {getSpeakerDisplayName(result.segments[effectiveSplit].speaker)}]:
                               </span>
                               <span className="text-slate-200">
                                 {result.segments[effectiveSplit].text || "（発言なし）"}
@@ -3537,17 +3719,17 @@ export default function Home() {
                   <h3 className="font-medium text-slate-300 text-sm uppercase tracking-wider">生の文字起こしデータ</h3>
                   <div className="flex gap-2">
                     <button
-                      onClick={() => copyToClipboard(result.segments.map((s: any) => `[${getSpeakerLabel(s.speaker)}] ${s.text}`).join('\n'), '文字起こし')}
-                      className="p-2 hover:bg-slate-700 rounded-lg transition-colors" title="コピー">
+                      onClick={() => copyToClipboard(result.segments.map((s: any) => `[${getSpeakerDisplayName(s.speaker)}] ${s.text}`).join('\n'), '文字起こし')}
+                      className="p-2 hover:bg-slate-700 rounded-lg transition-colors" title="コピー（名前表記付き）">
                       <Copy className="w-4 h-4 text-slate-400" />
                     </button>
                     <button
                       onClick={() => {
                         const header = buildDownloadHeader();
-                        const body = result.segments.map((s: any) => `[${formatTime(s.start)}-${formatTime(s.end)}] ${s.speaker.replace('SPEAKER_','話者')}: ${s.text}`).join('\n');
+                        const body = result.segments.map((s: any) => `[${formatTime(s.start)}-${formatTime(s.end)}] ${getSpeakerDisplayName(s.speaker)}: ${s.text}`).join('\n');
                         downloadAsText(header + body, `transcript_${new Date().toISOString().slice(0,10)}.txt`);
                       }}
-                      className="p-2 hover:bg-slate-700 rounded-lg transition-colors" title="ダウンロード">
+                      className="p-2 hover:bg-slate-700 rounded-lg transition-colors" title="ダウンロード（名前・漢字表記付き）">
                       <Download className="w-4 h-4 text-slate-400" />
                     </button>
                   </div>
@@ -3626,12 +3808,26 @@ export default function Home() {
                               >
                                 {allSpeakers.map(sp => (
                                   <option key={sp} value={sp} className="bg-slate-800 text-slate-200">
-                                    {speakerNames[sp] || sp.replace('SPEAKER_', '話者')}
+                                    {getSpeakerDisplayName(sp)}
                                   </option>
                                 ))}
                               </select>
                               <ChevronDown className="w-3 h-3 absolute right-1.5 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400" />
                             </div>
+                            {/* この話者の全発言一括変更ボタン */}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setReassignFromSpeaker(segment.speaker);
+                                const other = allSpeakers.find(s => s !== segment.speaker) || '';
+                                setReassignToSpeaker(other);
+                                setReassignModalOpen(true);
+                              }}
+                              title={`この話者（${getSpeakerDisplayName(segment.speaker)}）の全発言を別の話者に一括変更`}
+                              className="p-1 rounded-lg hover:bg-slate-700/60 text-slate-400 hover:text-indigo-300 transition-colors"
+                            >
+                              <Users className="w-3.5 h-3.5" />
+                            </button>
                             {/* タイムスタンプ */}
                             <span className="text-[10px] text-slate-500 flex items-center gap-1">
                               <Clock className="w-3 h-3" />
@@ -3739,7 +3935,7 @@ export default function Home() {
                           </button>
                           <div className="absolute right-0 top-full mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-20 min-w-[160px]">
                             {uniqueSpeakers.map(sp => {
-                              const name = speakerNames[sp] || sp.replace('SPEAKER_', '話者');
+                              const name = getSpeakerDisplayName(sp);
                               return (
                                 <button key={sp} onClick={() => {
                                   const lines = result.refinedText.split('\n').filter((l: string) => l.includes(`[${name}]`));
@@ -3759,7 +3955,7 @@ export default function Home() {
                     <p className="text-xs text-purple-300/70 mb-2 font-medium">参加者一覧</p>
                     <div className="flex flex-wrap gap-2">
                       {uniqueSpeakers.map(sp => {
-                        const name = speakerNames[sp] || sp.replace('SPEAKER_', '話者');
+                        const name = getSpeakerDisplayName(sp);
                         const role = speakerRoles[sp] || '参加者';
                         return (
                           <span key={sp} className="text-sm text-purple-200/90">
@@ -4053,6 +4249,190 @@ export default function Home() {
             >
               設定を保存して閉じる
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* 🔍 単語の一括置換モーダル */}
+      {showFindReplaceModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+          <div className="bg-[#0f1d2e] border border-cyan-700/50 rounded-2xl p-6 max-w-lg w-full shadow-2xl space-y-5">
+            <div className="flex items-center justify-between border-b border-cyan-800/40 pb-3">
+              <h3 className="text-base font-bold text-cyan-100 flex items-center gap-2">
+                <span className="text-lg">🔍</span>
+                単語の一括置換（誤字・表記ゆれ修正）
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowFindReplaceModal(false)}
+                className="text-slate-400 hover:text-slate-200 text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              誤認識された単語やひらがな表記を、正しい漢字や正式名称に全セグメント一括で置き換えます。文節を1行ずつ直す手間を省けます。
+            </p>
+
+            <div className="space-y-4">
+              <div>
+                <label className="text-xs font-semibold text-rose-300 block mb-1">
+                  置換前の単語（誤認識・直したい表記） <span className="text-rose-400 font-bold">*</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="例: かいぎ、怪異、SPK:1"
+                  value={findWord}
+                  onChange={(e) => setFindWord(e.target.value)}
+                  className="w-full bg-slate-900/80 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-rose-400 transition-colors"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-teal-300 block mb-1">
+                  置換後の単語（正しい漢字・表記）
+                </label>
+                <input
+                  type="text"
+                  placeholder="例: 会議、観自在力（空欄にすると削除）"
+                  value={replaceWord}
+                  onChange={(e) => setReplaceWord(e.target.value)}
+                  className="w-full bg-slate-900/80 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-teal-400 transition-colors"
+                />
+              </div>
+
+              <div className="space-y-2 pt-1 border-t border-slate-800 text-xs">
+                <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={addToDictionaryOnReplace}
+                    onChange={(e) => setAddToDictionaryOnReplace(e.target.checked)}
+                    className="rounded accent-teal-400"
+                  />
+                  <span>専門用語辞書（カスタム単語）にも自動追加する（次回以降も自動修正）</span>
+                </label>
+                <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={replaceInRefinedAndSummary}
+                    onChange={(e) => setReplaceInRefinedAndSummary(e.target.checked)}
+                    className="rounded accent-teal-400"
+                  />
+                  <span>推敲テキスト・要約テキストも同時に一括置換する</span>
+                </label>
+              </div>
+            </div>
+
+            <div className="flex gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowFindReplaceModal(false)}
+                className="flex-1 py-2.5 rounded-xl border border-slate-700 text-slate-300 hover:bg-slate-800 text-xs font-bold transition-colors"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={handleBatchReplaceWord}
+                disabled={!findWord.trim()}
+                className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-teal-500 to-cyan-500 text-white text-xs font-bold shadow-lg hover:brightness-110 active:scale-95 transition-all disabled:opacity-50"
+              >
+                ✨ 一括置換を実行
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 👥 話者の全発言一括変更モーダル */}
+      {reassignModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+          <div className="bg-[#0f1d2e] border border-indigo-700/50 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5">
+            <div className="flex items-center justify-between border-b border-indigo-800/40 pb-3">
+              <h3 className="text-base font-bold text-indigo-100 flex items-center gap-2">
+                <Users className="w-5 h-5 text-indigo-400" />
+                話者の全発言を一括変更
+              </h3>
+              <button
+                type="button"
+                onClick={() => setReassignModalOpen(false)}
+                className="text-slate-400 hover:text-slate-200 text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              誤って分離された話者の発言を、指定した別の話者に全件一括で付け替えます。
+            </p>
+
+            <div className="space-y-4">
+              <div>
+                <label className="text-xs font-semibold text-rose-300 block mb-1">
+                  変更元の話者（現在）
+                </label>
+                <select
+                  value={reassignFromSpeaker}
+                  onChange={(e) => setReassignFromSpeaker(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-400"
+                >
+                  {allSpeakers.map(sp => {
+                    const count = result?.segments?.filter((s: any) => s.speaker === sp).length || 0;
+                    return (
+                      <option key={sp} value={sp}>
+                        {getSpeakerDisplayName(sp)}（{count} 件の発言）
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+
+              <div className="text-center text-slate-500 font-bold text-sm">
+                ⬇️ 全発言を移行
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-teal-300 block mb-1">
+                  移行先の話者（新しく割り当てる話者）
+                </label>
+                <select
+                  value={reassignToSpeaker}
+                  onChange={(e) => setReassignToSpeaker(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-teal-400"
+                >
+                  {allSpeakers.map(sp => (
+                    <option key={sp} value={sp} disabled={sp === reassignFromSpeaker}>
+                      {getSpeakerDisplayName(sp)} {sp === reassignFromSpeaker ? '（変更元と同じ）' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {reassignFromSpeaker && (
+                <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-xs text-indigo-200">
+                  💡 「<span className="font-bold text-white">{getSpeakerDisplayName(reassignFromSpeaker)}</span>」の全 <span className="font-bold text-amber-300">{result?.segments?.filter((s: any) => s.speaker === reassignFromSpeaker).length || 0} 件</span> の発言が、「<span className="font-bold text-white">{getSpeakerDisplayName(reassignToSpeaker)}</span>」に変更されます。
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setReassignModalOpen(false)}
+                className="flex-1 py-2.5 rounded-xl border border-slate-700 text-slate-300 hover:bg-slate-800 text-xs font-bold transition-colors"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={() => reassignSpeakerAll(reassignFromSpeaker, reassignToSpeaker)}
+                disabled={!reassignFromSpeaker || !reassignToSpeaker || reassignFromSpeaker === reassignToSpeaker}
+                className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-500 text-white text-xs font-bold shadow-lg hover:brightness-110 active:scale-95 transition-all disabled:opacity-50"
+              >
+                🔄 全件を一括変更
+              </button>
+            </div>
           </div>
         </div>
       )}
