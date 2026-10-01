@@ -87,31 +87,87 @@ export async function POST(req: NextRequest) {
 
       const uploadData = await uploadRes.json();
       fileUri = uploadData.file?.uri;
+
+      // 音声処理が PROCESSING の場合は ACTIVE になるまで待機（最大60秒）
+      const fileName = uploadData.file?.name;
+      let fileState = uploadData.file?.state;
+      if (fileName && fileState === "PROCESSING") {
+        console.log(`[Gemini API] Audio file is PROCESSING, waiting for state ACTIVE... (${fileName})`);
+        for (let i = 0; i < 30; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          try {
+            const checkRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`);
+            if (checkRes.ok) {
+              const checkData = await checkRes.json();
+              fileState = checkData.state;
+              if (fileState === "ACTIVE") {
+                console.log("[Gemini API] Audio file is ACTIVE!");
+                break;
+              } else if (fileState === "FAILED") {
+                return NextResponse.json({ error: "Google File API で音声処理が失敗しました (STATE: FAILED)" }, { status: 400 });
+              }
+            }
+          } catch (e) {
+            console.warn("[Gemini API] Error checking file state:", e);
+          }
+        }
+      }
     }
 
     if (!fileUri) {
       return NextResponse.json({ error: "音声データ（file または file_uri）が指定されていません" }, { status: 400 });
     }
 
-    // 2. 実行するモデルリストの構築（gemini-3.5-transcribe を最優先）
-    const requestedModel = modelParam.replace("models/", "").trim();
+    // 2. 利用可能なモデル一覧を Google API から動的に取得（404の根絶）
+    let availableModels: string[] = [];
+    try {
+      const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        availableModels = (listData.models || [])
+          .filter((m: any) => m.supportedGenerationMethods?.includes("generateContent"))
+          .map((m: any) => m.name.replace("models/", ""));
+        console.log("[Gemini API] Dynamically discovered available models:", availableModels);
+      }
+    } catch (e) {
+      console.warn("[Gemini API] Failed to fetch ListModels:", e);
+    }
+
+    // 候補モデルリストの構築
+    const requestedModel = (modelParam || "").replace("models/", "").trim();
     let candidateModels: string[] = [];
 
-    if (requestedModel) {
+    // ユーザー指定モデル
+    if (requestedModel && !requestedModel.includes("transcribe") && !requestedModel.includes("flash-lite")) {
       candidateModels.push(requestedModel);
     }
 
-    // 公式の安定かつ高精度な音声対応モデル（最新の 2.5 系を最優先）
-    const primaryModels = [
+    // 推奨の現役モデル優先順
+    const preferredOrder = [
       "gemini-2.5-flash",
       "gemini-2.5-pro",
       "gemini-2.0-flash",
       "gemini-1.5-pro",
       "gemini-1.5-flash",
     ];
-    for (const pm of primaryModels) {
-      if (!candidateModels.includes(pm)) {
-        candidateModels.push(pm);
+
+    if (availableModels.length > 0) {
+      // 実際に API に存在するモデルのみを優先順で追加
+      for (const pref of preferredOrder) {
+        if (availableModels.includes(pref) && !candidateModels.includes(pref)) {
+          candidateModels.push(pref);
+        }
+      }
+      // その他 Gemini モデル
+      for (const av of availableModels) {
+        if (!candidateModels.includes(av) && av.toLowerCase().includes("gemini") && !av.toLowerCase().includes("lite") && !av.toLowerCase().includes("8b")) {
+          candidateModels.push(av);
+        }
+      }
+    } else {
+      // ListModels が取得できなかった場合のフォールバック
+      for (const pref of preferredOrder) {
+        if (!candidateModels.includes(pref)) candidateModels.push(pref);
       }
     }
 
@@ -323,10 +379,12 @@ export async function POST(req: NextRequest) {
     // B. generateContent による文字起こし（Interactions API 未使用またはフォールバック時）
     if (parsedSegments.length === 0) {
       let rawText = "";
-      const fallbackModels = candidateModels.filter(m => m !== "gemini-3.5-transcribe" && m !== "gemini-2.0-flash-lite");
-      if (!fallbackModels.includes("gemini-2.5-flash")) {
-        fallbackModels.unshift("gemini-2.5-flash");
+      const fallbackModels = candidateModels.filter(m => m !== "gemini-3.5-transcribe" && !m.includes("flash-lite"));
+      if (fallbackModels.length === 0) {
+        fallbackModels.push("gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash");
       }
+
+      const modelErrors: Record<string, string> = {};
 
       for (const modelCandidate of fallbackModels) {
         const generateUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelCandidate}:generateContent?key=${apiKey}`;
@@ -359,18 +417,24 @@ export async function POST(req: NextRequest) {
               break;
             }
           } else {
-            lastError = `(${genRes.status}) ${await genRes.text()}`;
+            const errBody = await genRes.text();
+            lastError = `(${genRes.status}) ${errBody}`;
+            modelErrors[modelCandidate] = lastError;
             console.warn(`[Gemini API] Model ${modelCandidate} error: ${lastError}`);
           }
         } catch (e: any) {
           lastError = e.message;
+          modelErrors[modelCandidate] = lastError;
           console.warn(`[Gemini API] Exception with ${modelCandidate}:`, e);
         }
       }
 
       if (!rawText) {
+        const errDetails = Object.entries(modelErrors)
+          .map(([m, err]) => `・【${m}】: ${err}`)
+          .join("\n");
         return NextResponse.json(
-          { error: `Gemini 文字起こしに失敗しました: ${lastError}` },
+          { error: `Gemini 文字起こしに失敗しました:\n${errDetails || lastError}` },
           { status: 500 }
         );
       }
