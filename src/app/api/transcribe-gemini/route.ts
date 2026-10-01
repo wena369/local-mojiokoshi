@@ -243,6 +243,7 @@ export async function POST(req: NextRequest) {
             languageCodes: ["ja-JP"],
             diarization: true,
             wordTimestamp: true,
+            mode: "VERBATIM",
           }
         }
       };
