@@ -409,7 +409,7 @@ export async function POST(req: NextRequest) {
       }
 
       // 対話スクリプト形式 ➔ セグメント配列へ変換
-      const rawLines = rawText.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+      const rawLines = rawText.split("\n").map((l: string) => l.trim()).filter((l: string) => l.length > 0);
       let currentSpeaker = "SPEAKER_00";
       let lastEnd = 0;
 
