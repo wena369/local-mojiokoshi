@@ -141,6 +141,106 @@ export function applyClientCustomWords(text: string, words: CustomWord[]): strin
   return res;
 }
 
+// 音声の総再生時間（秒数）を取得
+async function getAudioDuration(file: File): Promise<number> {
+  return new Promise((resolve) => {
+    try {
+      const url = URL.createObjectURL(file);
+      const audio = new Audio();
+      audio.preload = "metadata";
+      audio.onloadedmetadata = () => {
+        URL.revokeObjectURL(url);
+        resolve(audio.duration || 0);
+      };
+      audio.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(0);
+      };
+      audio.src = url;
+    } catch {
+      resolve(0);
+    }
+  });
+}
+
+// AudioBuffer を軽量 WAV Blob に変換する標準エンコーダー
+function audioBufferToWav(buffer: AudioBuffer): Blob {
+  const numOfChan = buffer.numberOfChannels;
+  const length = buffer.length * numOfChan * 2 + 44;
+  const out = new DataView(new ArrayBuffer(length));
+  const channels: Float32Array[] = [];
+  const sampleRate = buffer.sampleRate;
+  let offset = 0;
+  let pos = 0;
+
+  function setUint16(data: number) { out.setUint16(pos, data, true); pos += 2; }
+  function setUint32(data: number) { out.setUint32(pos, data, true); pos += 4; }
+
+  // RIFF header
+  setUint32(0x46464952); // "RIFF"
+  setUint32(length - 8);
+  setUint32(0x45564157); // "WAVE"
+  setUint32(0x20746d66); // "fmt "
+  setUint32(16);
+  setUint16(1); // PCM
+  setUint16(numOfChan);
+  setUint32(sampleRate);
+  setUint32(sampleRate * 2 * numOfChan);
+  setUint16(numOfChan * 2);
+  setUint16(16);
+  setUint32(0x61746164); // "data"
+  setUint32(length - pos - 4);
+
+  for (let i = 0; i < numOfChan; i++) {
+    channels.push(buffer.getChannelData(i));
+  }
+
+  while (offset < buffer.length) {
+    for (let i = 0; i < numOfChan; i++) {
+      let sample = Math.max(-1, Math.min(1, channels[i][offset]));
+      sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0;
+      out.setInt16(pos, sample, true);
+      pos += 2;
+    }
+    offset++;
+  }
+  return new Blob([out.buffer], { type: "audio/wav" });
+}
+
+// 長尺音声を指定区間（startSec〜endSec）で切り出し、16kHzモノラルの超軽量WAV Blobとして出力
+async function sliceAudioFileToWav(file: File, startSec: number, endSec: number): Promise<Blob> {
+  const arrayBuffer = await file.arrayBuffer();
+  const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+  const audioCtx = new AudioContextClass();
+  const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+
+  const srcRate = decoded.sampleRate;
+  const startSample = Math.max(0, Math.floor(startSec * srcRate));
+  const endSample = Math.min(decoded.length, Math.floor(endSec * srcRate));
+  const lengthSamples = Math.max(1, endSample - startSample);
+
+  // 16kHz モノラル（Gemini 3.5 Transcribeに最適化）にリサンプリング
+  const targetRate = 16000;
+  const targetLength = Math.ceil(lengthSamples * (targetRate / srcRate));
+  const offlineCtx = new OfflineAudioContext(1, targetLength, targetRate);
+
+  const subBuffer = audioCtx.createBuffer(decoded.numberOfChannels, lengthSamples, srcRate);
+  for (let ch = 0; ch < decoded.numberOfChannels; ch++) {
+    const chData = decoded.getChannelData(ch);
+    subBuffer.getChannelData(ch).set(chData.subarray(startSample, endSample));
+  }
+
+  const srcNode = offlineCtx.createBufferSource();
+  srcNode.buffer = subBuffer;
+  srcNode.connect(offlineCtx.destination);
+  srcNode.start(0);
+
+  const rendered = await offlineCtx.startRendering();
+  audioCtx.close();
+
+  return audioBufferToWav(rendered);
+}
+
 // 同一話者の連続セグメントを自然な文節・発話長に整える関数（細切れ＆大雑把すぎの両方を解消！）
 function mergeSameSpeakerBlocks(segments: any[]): any[] {
   if (!Array.isArray(segments) || segments.length === 0) return segments;
@@ -1363,46 +1463,7 @@ export default function Home() {
     if (sttEngine === "gemini") {
       const startTime = Date.now();
       try {
-        setProgress({ step: "☁️ Google Cloud に音声をアップロード中...", percent: 20 });
-        
-        // 1. Google AI Studio File Upload API へ直接アップロード（Vercelの4.5MB制限を完全回避）
-        const mimeType = file.type || "audio/mp3";
-        const uploadRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiApiKey.trim()}`, {
-          method: "POST",
-          headers: {
-            "X-Goog-Upload-Command": "start, upload, finalize",
-            "X-Goog-Upload-Header-Content-Length": String(file.size),
-            "X-Goog-Upload-Header-Content-Type": mimeType,
-            "Content-Type": mimeType,
-          },
-          body: file,
-          signal: controller.signal,
-        });
-
-        if (!uploadRes.ok) {
-          const errBody = await uploadRes.text();
-          throw new Error(`Google Upload Failed (${uploadRes.status}): ${errBody}`);
-        }
-
-        const uploadData = await uploadRes.json();
-        const fileUri = uploadData.file?.uri;
-        const uploadedMime = uploadData.file?.mimeType || mimeType;
-
-        if (!fileUri) {
-          throw new Error("Google File Upload did not return a valid file URI");
-        }
-
-        setProgress({ step: `🚀 ${geminiModel || "Gemini 3.5 Transcribe"} が超高速で文字起こし中...`, percent: 50 });
-        
-        // 2. 取得した fileUri だけを Vercel サーバーレス API に送信
-        const geminiFormData = new FormData();
-        geminiFormData.append("file_uri", fileUri);
-        geminiFormData.append("mime_type", uploadedMime);
-        geminiFormData.append("api_key", geminiApiKey.trim());
-        geminiFormData.append("gemini_model", "gemini-3.5-transcribe");
-        
-        // 🔒 プライバシー保護: 本名(realName)は外部APIに絶対に送信しない。
-        // ニックネーム(nickname)のみを name としてサニタイズして送信。
+        // 事前登録話者のサニタイズ（本名は送信せずニックネームのみ）
         const apiPreReg = usePreRegistration
           ? preRegisteredSpeakers
               .filter(s => (s.nickname || "").trim())
@@ -1412,28 +1473,163 @@ export default function Home() {
                 role: s.role || "参加者",
               }))
           : [];
-        geminiFormData.append("pre_registered_speakers_json", JSON.stringify(apiPreReg));
-
+        const preRegJson = JSON.stringify(apiPreReg);
         const activeCustomWords = customWords.filter(w => w.enabled && w.term.trim());
-        geminiFormData.append("custom_dictionary_json", JSON.stringify(activeCustomWords));
-        geminiFormData.append("speaker_count_hint", speakerCountHint);
+        const customDictJson = JSON.stringify(activeCustomWords);
 
-        const res = await fetch("/api/transcribe-gemini", {
-          method: "POST",
-          body: geminiFormData,
-          signal: controller.signal,
-        });
+        // 1つのオーディオBlob（またはFile）を Google AI Studio 経由で文字起こしするヘルパー
+        const transcribeOneChunk = async (
+          blobToUpload: Blob,
+          mime: string,
+          chunkLabel: string,
+          pctStart: number,
+          pctEnd: number
+        ): Promise<any[]> => {
+          setProgress({ step: `☁️ [${chunkLabel}] Google Cloud に音声をアップロード中...`, percent: pctStart });
 
-        if (!res.ok) {
-          const errData = await res.json().catch(() => ({ error: res.statusText }));
-          throw new Error(errData.error || `Gemini API error: ${res.status}`);
+          const uploadRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiApiKey.trim()}`, {
+            method: "POST",
+            headers: {
+              "X-Goog-Upload-Command": "start, upload, finalize",
+              "X-Goog-Upload-Header-Content-Length": String(blobToUpload.size),
+              "X-Goog-Upload-Header-Content-Type": mime,
+              "Content-Type": mime,
+            },
+            body: blobToUpload,
+            signal: controller.signal,
+          });
+
+          if (!uploadRes.ok) {
+            const errBody = await uploadRes.text();
+            throw new Error(`Google Upload Failed (${uploadRes.status}): ${errBody}`);
+          }
+
+          const uploadData = await uploadRes.json();
+          const fileUri = uploadData.file?.uri;
+          const uploadedMime = uploadData.file?.mimeType || mime;
+
+          if (!fileUri) {
+            throw new Error("Google File Upload did not return a valid file URI");
+          }
+
+          const transcribePct = Math.round(pctStart + (pctEnd - pctStart) * 0.4);
+          setProgress({ step: `🚀 [${chunkLabel}] Gemini 3.5 Transcribe が文字起こし中...`, percent: transcribePct });
+
+          const geminiFormData = new FormData();
+          geminiFormData.append("file_uri", fileUri);
+          geminiFormData.append("mime_type", uploadedMime);
+          geminiFormData.append("api_key", geminiApiKey.trim());
+          geminiFormData.append("gemini_model", "gemini-3.5-transcribe");
+          geminiFormData.append("pre_registered_speakers_json", preRegJson);
+          geminiFormData.append("custom_dictionary_json", customDictJson);
+          geminiFormData.append("speaker_count_hint", speakerCountHint);
+
+          const res = await fetch("/api/transcribe-gemini", {
+            method: "POST",
+            body: geminiFormData,
+            signal: controller.signal,
+          });
+
+          if (!res.ok) {
+            const errData = await res.json().catch(() => ({ error: res.statusText }));
+            throw new Error(errData.error || `Gemini API error: ${res.status}`);
+          }
+
+          const data = await res.json();
+          return data.segments || [];
+        };
+
+        // 音声の長さを測定（Google公式制約: diarization/timestamps利用時は最大30分=1800秒 / 98304トークン）
+        setProgress({ step: "🔍 音声ファイルの長さを解析中...", percent: 5 });
+        const totalDurationSec = await getAudioDuration(file);
+        console.log(`[Gemini STT] Detected audio duration: ${totalDurationSec}s`);
+
+        // 安全マージンをとって 20分（1200秒）ごとに分割
+        const CHUNK_DURATION_SEC = 20 * 60;
+        let allCombinedSegments: any[] = [];
+
+        if (totalDurationSec > CHUNK_DURATION_SEC) {
+          // 長尺音声: クライアント側で20分ごとに自動スライスして順次文字起こし & シームレス結合
+          const numChunks = Math.ceil(totalDurationSec / CHUNK_DURATION_SEC);
+          console.log(`[Gemini STT] Audio exceeds 20 minutes (${totalDurationSec}s). Auto-chunking into ${numChunks} parts.`);
+
+          for (let ci = 0; ci < numChunks; ci++) {
+            const chunkStartSec = ci * CHUNK_DURATION_SEC;
+            const chunkEndSec = Math.min(totalDurationSec, (ci + 1) * CHUNK_DURATION_SEC);
+            const chunkPctBase = Math.round(10 + (ci / numChunks) * 85);
+            const chunkPctEnd = Math.round(10 + ((ci + 1) / numChunks) * 85);
+
+            const mStart = Math.floor(chunkStartSec / 60);
+            const sStart = String(Math.floor(chunkStartSec % 60)).padStart(2, "0");
+            const mEnd = Math.floor(chunkEndSec / 60);
+            const sEnd = String(Math.floor(chunkEndSec % 60)).padStart(2, "0");
+            const chunkLabel = `パート ${ci + 1}/${numChunks} (${mStart}:${sStart}〜${mEnd}:${sEnd})`;
+
+            setProgress({ step: `✂️ [${chunkLabel}] 音声を最適サイズにスライス中...`, percent: chunkPctBase });
+            const chunkWavBlob = await sliceAudioFileToWav(file, chunkStartSec, chunkEndSec);
+
+            const chunkRawSegs = await transcribeOneChunk(
+              chunkWavBlob,
+              "audio/wav",
+              chunkLabel,
+              chunkPctBase + 2,
+              chunkPctEnd
+            );
+
+            // タイムスタンプに開始秒数（chunkStartSec）をオフセット加算して結合
+            for (const seg of chunkRawSegs) {
+              const segStart = (typeof seg.start === "number" ? seg.start : parseFloat(seg.start) || 0) + chunkStartSec;
+              const segEnd = (typeof seg.end === "number" ? seg.end : parseFloat(seg.end) || 0) + chunkStartSec;
+              allCombinedSegments.push({
+                ...seg,
+                start: Math.round(segStart * 10) / 10,
+                end: Math.round(segEnd * 10) / 10,
+              });
+            }
+          }
+        } else {
+          // 20分以下の音声: そのまま丸ごと 1 回で超高速文字起こし
+          const originalMime = file.type || "audio/mp3";
+          try {
+            allCombinedSegments = await transcribeOneChunk(file, originalMime, "超高速文字起こし", 15, 95);
+          } catch (singleErr: any) {
+            // 万が一 duration が 0 で取得できず、かつ 98304 トークン上限エラーが出た場合の自動リカバリー
+            if (String(singleErr?.message || "").includes("98304") || String(singleErr?.message || "").includes("exceeds the maximum number of tokens allowed")) {
+              console.warn("[Gemini STT] Hit 98304 token limit during single upload. Falling back to client-side audio chunking...");
+              setProgress({ step: "⚠️ 音声が長尺のため、自動分割モードに切り替えて再試行中...", percent: 20 });
+              
+              // Web Audio API で実際の長さを取得
+              const arrBuf = await file.arrayBuffer();
+              const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+              const decBuf = await audioCtx.decodeAudioData(arrBuf);
+              const realDuration = decBuf.duration;
+              audioCtx.close();
+
+              const numChunks = Math.ceil(realDuration / CHUNK_DURATION_SEC);
+              for (let ci = 0; ci < numChunks; ci++) {
+                const chunkStartSec = ci * CHUNK_DURATION_SEC;
+                const chunkEndSec = Math.min(realDuration, (ci + 1) * CHUNK_DURATION_SEC);
+                const chunkLabel = `パート ${ci + 1}/${numChunks}`;
+                const chunkWavBlob = await sliceAudioFileToWav(file, chunkStartSec, chunkEndSec);
+                const chunkRawSegs = await transcribeOneChunk(chunkWavBlob, "audio/wav", chunkLabel, 20 + Math.round((ci / numChunks) * 75), 20 + Math.round(((ci + 1) / numChunks) * 75));
+                for (const seg of chunkRawSegs) {
+                  const segStart = (typeof seg.start === "number" ? seg.start : parseFloat(seg.start) || 0) + chunkStartSec;
+                  const segEnd = (typeof seg.end === "number" ? seg.end : parseFloat(seg.end) || 0) + chunkStartSec;
+                  allCombinedSegments.push({
+                    ...seg,
+                    start: Math.round(segStart * 10) / 10,
+                    end: Math.round(segEnd * 10) / 10,
+                  });
+                }
+              }
+            } else {
+              throw singleErr;
+            }
+          }
         }
 
-        const data = await res.json();
-        const rawSegments = data.segments || [];
-        
         // 万能パース＆辞書置換
-        const unpacked = ensureSegmentIds(unpackSegments(rawSegments));
+        const unpacked = ensureSegmentIds(unpackSegments(allCombinedSegments));
         const processedSegments = unpacked.map((s: any) => ({
           ...s,
           text: applyClientCustomWords(s.text || '', customWords),
@@ -1441,7 +1637,7 @@ export default function Home() {
 
         const elapsed = Math.floor((Date.now() - startTime) / 1000);
         const elapsedStr = `${Math.floor(elapsed/60)}分${elapsed%60}秒`;
-        setProgress({ step: `✅ 完了！（処理時間: ${elapsedStr}）`, percent: 100 });
+        setProgress({ step: `✅ 完了！（全編文字起こし完了・処理時間: ${elapsedStr}）`, percent: 100 });
 
         const completedResult = {
           segments: processedSegments,
