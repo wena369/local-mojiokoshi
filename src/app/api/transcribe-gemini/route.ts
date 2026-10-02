@@ -120,11 +120,11 @@ export async function POST(req: NextRequest) {
     }
 
     // 2. 使用するGeminiモデルの決定
-    // クライアントで指定されたモデル（gemini-2.5-pro, gemini-3.5-transcribe 等）を優先
-    // 未指定時のデフォルトは長尺音声で制限のない高精度モデル gemini-2.5-pro
+    // クライアントで指定されたモデルを優先
+    // Googleの仕様変更により廃止された gemini-2.5-pro は、Google公式指示に従って最新の gemini-3.1-pro-preview に自動昇格
     let activeModel = (formData.get("gemini_model") as string || "").trim();
-    if (!activeModel) {
-      activeModel = "gemini-2.5-pro";
+    if (!activeModel || activeModel.includes("2.5") || activeModel === "gemini-2.5-pro") {
+      activeModel = "gemini-3.1-pro-preview";
     }
 
     console.log(`[Gemini API] Transcribing with model: ${activeModel}`);
@@ -548,44 +548,77 @@ export async function POST(req: NextRequest) {
         );
       }
     } else {
-      // B. ユーザーが明示的に汎用モデル（gemini-2.5-pro 等）を指定した場合
-      const generateUrl = `https://generativelanguage.googleapis.com/v1beta/models/${activeModel}:generateContent?key=${apiKey}`;
-      console.log(`[Gemini API] Requesting transcription with user-specified model: ${activeModel}`);
-      const genRes = await fetch(generateUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { fileData: { fileUri, mimeType } },
-              { text: promptText }
-            ]
-          }],
-          generationConfig: {
-            temperature: 0.0,
-            maxOutputTokens: 65536
-          }
-        }),
-      });
+      // B. ユーザーが明示的に汎用モデル（gemini-3.1-pro-preview 等）を指定した場合
+      // 404（モデル廃止・提供終了）を完全防止するため、Google推奨の最新候補モデルを順に試行
+      const modelCandidates = Array.from(new Set([
+        activeModel,
+        "gemini-3.1-pro-preview",
+        "gemini-3-flash-preview",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
+      ])).filter(m => !m.includes("2.5")); // 廃止された2.5は除外
 
-      if (!genRes.ok) {
+      let genData: any = null;
+      let successfulModel = activeModel;
+      let lastGenError = "";
+      let lastGenStatus = 500;
+
+      for (const m of modelCandidates) {
+        const generateUrl = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`;
+        console.log(`[Gemini API] Requesting transcription with candidate model: ${m}`);
+        const genRes = await fetch(generateUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { fileData: { fileUri, mimeType } },
+                { text: promptText }
+              ]
+            }],
+            generationConfig: {
+              temperature: 0.0,
+              maxOutputTokens: 65536
+            }
+          }),
+        });
+
+        if (genRes.ok) {
+          genData = await genRes.json();
+          successfulModel = m;
+          usedModel = m;
+          console.log(`[Gemini API] Transcription succeeded with model: ${m}`);
+          break;
+        }
+
         const errBody = await genRes.text();
-        let errMsg = errBody;
+        lastGenStatus = genRes.status;
+        lastGenError = errBody;
         try {
           const errJson = JSON.parse(errBody);
-          errMsg = errJson.error?.message || errBody;
+          lastGenError = errJson.error?.message || errBody;
         } catch {}
+
+        console.warn(`[Gemini API] Candidate model ${m} failed (${genRes.status}): ${lastGenError}`);
+
+        // 404（モデルが存在しない・廃止）の場合は次の候補を即座に試行
+        if (genRes.status === 404) {
+          continue;
+        }
+        break;
+      }
+
+      if (!genData) {
         return NextResponse.json(
-          { error: `【${activeModel} エラー (${genRes.status})】\n${errMsg}` },
-          { status: genRes.status }
+          { error: `【${successfulModel} エラー (${lastGenStatus})】\n${lastGenError}` },
+          { status: lastGenStatus }
         );
       }
 
-      const genData = await genRes.json();
       const rawText = genData.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!rawText || !rawText.trim()) {
         return NextResponse.json(
-          { error: `【${activeModel} エラー】モデルからの文字起こし応答が空でした。` },
+          { error: `【${successfulModel} エラー】モデルからの文字起こし応答が空でした。` },
           { status: 500 }
         );
       }
