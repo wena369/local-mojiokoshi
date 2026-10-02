@@ -2123,6 +2123,9 @@ export default function Home() {
           speaker_names: speakerNames,
           speaker_readings: speakerReadings,
           speaker_roles: speakerRoles,
+          model: selectedServer.llmModel && selectedServer.llmModel !== 'N/A' && selectedServer.llmModel !== 'Gemma 4 26B' && selectedServer.llmModel !== 'Local LM Studio'
+            ? selectedServer.llmModel
+            : undefined,
         }),
       });
       if (!response.ok) throw new Error(`サーバーエラー (${response.status})`);
