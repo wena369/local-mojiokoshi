@@ -582,7 +582,13 @@ export default function Home() {
       return "";
     }
   });
-  const [geminiModel, setGeminiModel] = useState<string>("gemini-3.5-transcribe");
+  const [geminiModel, setGeminiModel] = useState<string>(() => {
+    try {
+      return localStorage.getItem('ai-transcriber-gemini-model') || "gemini-2.5-pro";
+    } catch {
+      return "gemini-2.5-pro";
+    }
+  });
   const [deepgramApiKey, setDeepgramApiKey] = useState<string>(() => {
     try {
       return localStorage.getItem(LS_DEEPGRAM_KEY_KEY) || "";
@@ -1657,13 +1663,14 @@ export default function Home() {
           }
 
           const transcribePct = Math.round(pctStart + (pctEnd - pctStart) * 0.4);
-          setProgress({ step: `🚀 [${chunkLabel}] Gemini 3.5 Transcribe が文字起こし中...`, percent: transcribePct });
+          const modelDisplayName = geminiModel === "gemini-3.5-transcribe" ? "Gemini 3.5 Transcribe" : "Gemini 2.5 Pro";
+          setProgress({ step: `🚀 [${chunkLabel}] ${modelDisplayName} が文字起こし中...`, percent: transcribePct });
 
           const geminiFormData = new FormData();
           geminiFormData.append("file_uri", fileUri);
           geminiFormData.append("mime_type", uploadedMime);
           geminiFormData.append("api_key", geminiApiKey.trim());
-          geminiFormData.append("gemini_model", "gemini-3.5-transcribe");
+          geminiFormData.append("gemini_model", geminiModel);
           geminiFormData.append("pre_registered_speakers_json", preRegJson);
           geminiFormData.append("custom_dictionary_json", customDictJson);
           geminiFormData.append("speaker_count_hint", speakerCountHint);
@@ -2605,6 +2612,60 @@ export default function Home() {
                       ✓ APIキー設定済み（ブラウザに自動保存）
                     </p>
                   )}
+
+                  {/* 🤖 使用モデル切り替え */}
+                  <div className="pt-2 border-t border-blue-900/50">
+                    <label className="text-[11px] font-semibold text-blue-300 block mb-1.5">
+                      🤖 使用するGeminiモデル（音声の長さに応じて選択）
+                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGeminiModel("gemini-2.5-pro");
+                          try { localStorage.setItem('ai-transcriber-gemini-model', 'gemini-2.5-pro'); } catch {}
+                        }}
+                        className={`p-2.5 rounded-xl border text-left transition-all ${
+                          geminiModel === "gemini-2.5-pro"
+                            ? "bg-blue-600/30 border-blue-400 text-blue-100 shadow-md ring-1 ring-blue-400"
+                            : "bg-slate-900/70 border-slate-700/80 text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+                        }`}
+                      >
+                        <div className="font-bold flex items-center justify-between">
+                          <span>⭐ Gemini 2.5 Pro</span>
+                          <span className="text-[10px] bg-emerald-500/25 text-emerald-300 px-1.5 py-0.5 rounded font-bold border border-emerald-500/40">
+                            長尺・上限なし推奨
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-slate-300 mt-1 leading-snug">
+                          10分〜数時間の長い音声でもエラーなしで一発文字起こし
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGeminiModel("gemini-3.5-transcribe");
+                          try { localStorage.setItem('ai-transcriber-gemini-model', 'gemini-3.5-transcribe'); } catch {}
+                        }}
+                        className={`p-2.5 rounded-xl border text-left transition-all ${
+                          geminiModel === "gemini-3.5-transcribe"
+                            ? "bg-blue-600/30 border-blue-400 text-blue-100 shadow-md ring-1 ring-blue-400"
+                            : "bg-slate-900/70 border-slate-700/80 text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+                        }`}
+                      >
+                        <div className="font-bold flex items-center justify-between">
+                          <span>Gemini 3.5 Transcribe</span>
+                          <span className="text-[10px] bg-amber-500/25 text-amber-300 px-1.5 py-0.5 rounded font-bold border border-amber-500/40">
+                            約6分以内用
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-slate-400 mt-1 leading-snug">
+                          音声専用最高精度（※Googleプレビュー制限中: 6分超は429エラー）
+                        </div>
+                      </button>
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -3392,6 +3453,32 @@ export default function Home() {
               <div className="text-red-200/90 text-sm whitespace-pre-wrap leading-relaxed font-sans bg-black/30 p-4 rounded-xl border border-red-500/20 mt-2 select-text">
                 {errorMsg}
               </div>
+
+              {/* 429 エラー時のワンクリック解決ボタン */}
+              {errorMsg.includes("429") && (
+                <div className="mt-3.5 p-3.5 bg-blue-950/60 border border-blue-500/40 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-in fade-in duration-300">
+                  <div className="text-xs text-blue-200">
+                    <span className="font-bold text-white block mb-0.5">💡 今すぐ長尺音声を文字起こししたい場合</span>
+                    制限のない「Gemini 2.5 Pro」に切り替えると、このまま即座に文字起こしを開始できます。
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setGeminiModel("gemini-2.5-pro");
+                      try { localStorage.setItem('ai-transcriber-gemini-model', 'gemini-2.5-pro'); } catch {}
+                      setErrorMsg(null);
+                      // 直後に再実行
+                      setTimeout(() => {
+                        handleSubmit();
+                      }, 100);
+                    }}
+                    className="px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs rounded-xl shadow-lg flex items-center gap-1.5 flex-shrink-0 transition-all active:scale-95 cursor-pointer"
+                  >
+                    <span>🔄</span>
+                    <span>Gemini 2.5 Pro で今すぐ再実行</span>
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -4189,18 +4276,54 @@ export default function Home() {
 
                   <div className="space-y-1.5">
                     <label className="text-xs font-semibold text-blue-300 block">
-                      使用モデル
+                      使用モデル（音声の長さに応じて選択）
                     </label>
-                    <div className="p-3 bg-slate-900 border border-blue-500/30 rounded-xl space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-bold text-blue-200">gemini-3.5-transcribe</span>
-                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                          最新特化モデル（固定）
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-slate-400">
-                        Google公式の最新音声文字起こし専用モデル。高精度話者分離と単語タイムスタンプに対応しています。
-                      </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGeminiModel("gemini-2.5-pro");
+                          try { localStorage.setItem('ai-transcriber-gemini-model', 'gemini-2.5-pro'); } catch {}
+                        }}
+                        className={`p-2.5 rounded-xl border text-left transition-all ${
+                          geminiModel === "gemini-2.5-pro"
+                            ? "bg-blue-600/30 border-blue-400 text-blue-100 shadow-md ring-1 ring-blue-400"
+                            : "bg-slate-900 border-slate-700/80 text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        <div className="font-bold flex items-center justify-between">
+                          <span>⭐ Gemini 2.5 Pro</span>
+                          <span className="text-[10px] bg-emerald-500/25 text-emerald-300 px-1.5 py-0.5 rounded font-bold border border-emerald-500/40">
+                            長尺推奨
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-slate-400 mt-1 leading-snug">
+                          上限なし（最大44時間）。10分以上の音声でもエラーゼロで一発文字起こし
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGeminiModel("gemini-3.5-transcribe");
+                          try { localStorage.setItem('ai-transcriber-gemini-model', 'gemini-3.5-transcribe'); } catch {}
+                        }}
+                        className={`p-2.5 rounded-xl border text-left transition-all ${
+                          geminiModel === "gemini-3.5-transcribe"
+                            ? "bg-blue-600/30 border-blue-400 text-blue-100 shadow-md ring-1 ring-blue-400"
+                            : "bg-slate-900 border-slate-700/80 text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        <div className="font-bold flex items-center justify-between">
+                          <span>Gemini 3.5 Transcribe</span>
+                          <span className="text-[10px] bg-amber-500/25 text-amber-300 px-1.5 py-0.5 rounded font-bold border border-amber-500/40">
+                            約6分以内用
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-slate-400 mt-1 leading-snug">
+                          音声専用最高精度（※Googleプレビュー制限中: 6分超は429エラー）
+                        </div>
+                      </button>
                     </div>
                   </div>
                 </div>

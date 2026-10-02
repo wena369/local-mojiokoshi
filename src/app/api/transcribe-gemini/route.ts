@@ -120,11 +120,14 @@ export async function POST(req: NextRequest) {
     }
 
     // 2. 使用するGeminiモデルの決定
-    // ユーザー要望: gemini-3.5-transcribe より下位のモデルは一切使わない
-    // 旧モデル（gemini-2.5-flash等）が送信されてきた場合も含め、常に最新の gemini-3.5-transcribe を強制使用
-    const activeModel = "gemini-3.5-transcribe";
+    // クライアントで指定されたモデル（gemini-2.5-pro, gemini-3.5-transcribe 等）を優先
+    // 未指定時のデフォルトは長尺音声で制限のない高精度モデル gemini-2.5-pro
+    let activeModel = (formData.get("gemini_model") as string || "").trim();
+    if (!activeModel) {
+      activeModel = "gemini-2.5-pro";
+    }
 
-    console.log(`[Gemini API] Transcribing exclusively with official target model: ${activeModel}`);
+    console.log(`[Gemini API] Transcribing with model: ${activeModel}`);
 
     // 3. 専門用語・固有名詞辞書
     let customWordsList: any[] = [];
@@ -406,14 +409,13 @@ export async function POST(req: NextRequest) {
       if (!genData) {
         let quotaAdvice = "";
         if (lastStatus === 429) {
-          const retryMatch = lastErrorText.match(/retry in ([0-9\.]+)s/i);
-          const waitSec = retryMatch ? Math.ceil(parseFloat(retryMatch[1])) : 35;
-          quotaAdvice = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💡【原因と解決手順】\n現在お使いのAPIキーは Google AI Studio の「無料プラン（Free Tier: 音声入力上限 10,000トークン/分）」に設定されているため、APIのリクエスト上限（レートリミット）に達しました。\n\n1. 【推奨・即時解除】\nGoogle AI Studio (https://aistudio.google.com/) にアクセスし、プロジェクトに請求先アカウント（従量課金: Pay-as-you-go）を紐付けてください。上限が一気に数百万トークンに引き上げられ、長時間の音声も無制限に文字起こし可能になります。\n\n2. 【無料枠のまま再試行】\n無料枠の利用枠は1分単位で回復します。約 ${waitSec} 秒 ほど待ってから、もう一度「文字起こし開始」を押してください。\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+          quotaAdvice = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💡【長尺音声をお使いの場合】\n最新モデル「gemini-3.5-transcribe」は現在Google側のプレビュー仕様により、有料プラン（Tier 1）でも1回あたり10,000トークン（約6分40秒）の制限が設けられています。\n\n6分40秒を超える音声は、画面のモデル選択を【Gemini 2.5 Pro（長尺・制限なし推奨）】に切り替えると、上限なし（最大44時間）で今すぐ文字起こしが可能です！\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
         }
 
         return NextResponse.json(
           {
-            error: `【${activeModel} 呼び出しエラー (${lastStatus})】\n${lastErrorText}${quotaAdvice}\n\n※下位モデルへの自動フォールバックは無効化されています。`
+            error: `【${activeModel} 呼び出しエラー (${lastStatus})】\n${lastErrorText}${quotaAdvice}`,
+            canSwitchToPro: true,
           },
           { status: lastStatus >= 400 && lastStatus < 500 ? lastStatus : 500 }
         );
