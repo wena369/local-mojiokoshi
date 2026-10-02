@@ -404,9 +404,16 @@ export async function POST(req: NextRequest) {
       }
 
       if (!genData) {
+        let quotaAdvice = "";
+        if (lastStatus === 429) {
+          const retryMatch = lastErrorText.match(/retry in ([0-9\.]+)s/i);
+          const waitSec = retryMatch ? Math.ceil(parseFloat(retryMatch[1])) : 35;
+          quotaAdvice = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💡【原因と解決手順】\n現在お使いのAPIキーは Google AI Studio の「無料プラン（Free Tier: 音声入力上限 10,000トークン/分）」に設定されているため、APIのリクエスト上限（レートリミット）に達しました。\n\n1. 【推奨・即時解除】\nGoogle AI Studio (https://aistudio.google.com/) にアクセスし、プロジェクトに請求先アカウント（従量課金: Pay-as-you-go）を紐付けてください。上限が一気に数百万トークンに引き上げられ、長時間の音声も無制限に文字起こし可能になります。\n\n2. 【無料枠のまま再試行】\n無料枠の利用枠は1分単位で回復します。約 ${waitSec} 秒 ほど待ってから、もう一度「文字起こし開始」を押してください。\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+        }
+
         return NextResponse.json(
           {
-            error: `【${activeModel} 呼び出しエラー (${lastStatus})】\n${lastErrorText}\n\n※下位モデルへのフォールバックは行いません。APIキーの有効性やプロジェクトのモデル利用権限をご確認ください。`
+            error: `【${activeModel} 呼び出しエラー (${lastStatus})】\n${lastErrorText}${quotaAdvice}\n\n※下位モデルへの自動フォールバックは無効化されています。`
           },
           { status: lastStatus >= 400 && lastStatus < 500 ? lastStatus : 500 }
         );

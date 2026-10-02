@@ -3385,11 +3385,13 @@ export default function Home() {
 
         {/* Error Display */}
         {errorMsg && !isProcessing && (
-          <div className="mt-8 bg-red-500/10 border border-red-500/30 rounded-2xl p-6 flex items-start gap-4">
+          <div className="mt-8 bg-red-500/10 border border-red-500/30 rounded-2xl p-6 flex items-start gap-4 animate-in fade-in duration-200">
             <AlertCircle className="w-6 h-6 text-red-400 flex-shrink-0 mt-0.5" />
-            <div>
-              <h3 className="font-semibold text-red-300 mb-1">エラーが発生しました</h3>
-              <p className="text-red-200/70 text-sm">{errorMsg}</p>
+            <div className="flex-1">
+              <h3 className="font-semibold text-red-300 text-base mb-1">エラーが発生しました</h3>
+              <div className="text-red-200/90 text-sm whitespace-pre-wrap leading-relaxed font-sans bg-black/30 p-4 rounded-xl border border-red-500/20 mt-2 select-text">
+                {errorMsg}
+              </div>
             </div>
           </div>
         )}
